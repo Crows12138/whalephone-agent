@@ -32,7 +32,7 @@ class AgentService : Service() {
     override fun onBind(i: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACT_STOP) { stop(); return START_NOT_STICKY }
+        if (intent?.action == ACT_STOP) { Watch.clear(this); stop(); return START_NOT_STICKY }
 
         val goal = intent?.getStringExtra(EXTRA_GOAL).orEmpty()
         if (goal.isBlank()) { stopSelf(); return START_NOT_STICKY }
@@ -68,6 +68,21 @@ class AgentService : Service() {
             Agent.Outcome(false, "异常: ${it.message}", emptyList())
         }
         Log.i(TAG, "结束 done=${out.done} ${out.message}")
+
+        // 长时任务:这一轮结束不等于任务结束
+        if (Watch.plan(this) != null) {
+            val changed = Watch.record(this, out.message)
+            display?.release(); display = null
+            val next = Watch.scheduleNext(this)
+            if (next == null) {
+                finish("盯完了。最后一次的结果:${out.message}")
+            } else {
+                if (changed) alert("有变化", out.message)
+                update("盯着呢 · 下次 $next", out.message)
+                Log.i(TAG, "本轮结束,${if (changed) "有变化" else "没变化"},下次 $next")
+            }
+            return
+        }
         finish(out.message)
     }
 
@@ -131,6 +146,21 @@ class AgentService : Service() {
 
     private fun note(body: String) = update("手机助理", body)
 
+    /** 需要用户注意但不需要他拍板的事,比如盯着的价格变了 */
+    private fun alert(title: String, body: String) {
+        channel()
+        nm().notify(
+            NOTI_ASK,
+            Notification.Builder(this, CH_ASK)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(Notification.BigTextStyle().bigText(body))
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setAutoCancel(true)
+                .build()
+        )
+    }
+
     private fun ask(q: String) {
         channel()
         nm().notify(
@@ -157,5 +187,8 @@ class AgentService : Service() {
         fun start(ctx: Context, goal: String) {
             ctx.startForegroundService(Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))
         }
+
+        /** 长时任务的一轮,由 Watch 的闹钟触发 */
+        fun startRound(ctx: Context, goal: String) = start(ctx, goal)
     }
 }
