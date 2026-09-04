@@ -4,12 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "ai.whalephone.probe"
+    namespace = "ai.whalephone.agent"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
 
     defaultConfig {
-        applicationId = "ai.whalephone.probe"
+        applicationId = "ai.whalephone.agent"
         minSdk = 30                  // getWindowsOnAllDisplays 需要 API 30
         targetSdk = 36
         versionCode = 1

@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.app.AlarmManager
 import android.app.PendingIntent
@@ -98,7 +98,7 @@ object Watch {
     private fun cancelAlarm(ctx: Context) =
         ctx.getSystemService(AlarmManager::class.java).cancel(alarmIntent(ctx))
 
-    const val ACT_ROUND = "ai.whalephone.probe.ROUND"
+    const val ACT_ROUND = "ai.whalephone.agent.ROUND"
 
     class Alarm : BroadcastReceiver() {
         override fun onReceive(ctx: Context, i: Intent) {

@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -46,7 +46,7 @@ class AgentService : Service() {
     }
 
     private fun runTask(goal: String) {
-        val probe = ProbeService.instance
+        val probe = EyesAndHands.instance
         if (probe == null) { finish("无障碍服务没开,agent 没有眼睛"); return }
         if (!Privileged.connect(this)) { finish("特权桥没连上,检查 Shizuku 是否在运行并已授权"); return }
         val llm = Config.llm(this) ?: run { finish("没配 LLM_API_KEY"); return }
@@ -181,7 +181,7 @@ class AgentService : Service() {
         private const val CH_ASK = "agent_ask"
         private const val NOTI_ID = 1
         private const val NOTI_ASK = 2
-        const val ACT_STOP = "ai.whalephone.probe.STOP"
+        const val ACT_STOP = "ai.whalephone.agent.STOP"
         const val EXTRA_GOAL = "goal"
 
         fun start(ctx: Context, goal: String) {

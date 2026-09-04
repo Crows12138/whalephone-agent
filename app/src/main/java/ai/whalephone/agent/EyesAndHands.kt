@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
@@ -8,7 +8,7 @@ import android.content.IntentFilter
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
-private const val TAG = "WPProbe"
+private const val TAG = "WPEyes"
 
 /**
  * 无障碍服务:agent 的眼睛和手。
@@ -24,7 +24,7 @@ private const val TAG = "WPProbe"
  *   CLICK --ei display N --es text S | --ei index I
  *   TEXT  --ei display N --ei index I --es text S
  */
-class ProbeService : AccessibilityService() {
+class EyesAndHands : AccessibilityService() {
 
     private val clipboard by lazy { ClipboardGuard(this) }
 
@@ -43,7 +43,7 @@ class ProbeService : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
-        Log.i(TAG, "=== ProbeService connected ===")
+        Log.i(TAG, "=== 无障碍服务已连接 ===")
         registerReceiver(
             receiver,
             IntentFilter().apply {
@@ -157,12 +157,12 @@ class ProbeService : AccessibilityService() {
 
     companion object {
         /** agent 侧唯一的入口。无障碍服务全进程只有一个实例,生命周期由系统托管。 */
-        @Volatile var instance: ProbeService? = null
+        @Volatile var instance: EyesAndHands? = null
 
-        const val ACT_DUMP  = "ai.whalephone.probe.DUMP"
-        const val ACT_SNAP  = "ai.whalephone.probe.SNAP"
-        const val ACT_CLICK = "ai.whalephone.probe.CLICK"
-        const val ACT_TEXT  = "ai.whalephone.probe.TEXT"
-        const val ACT_BRIDGE = "ai.whalephone.probe.BRIDGE"
+        const val ACT_DUMP  = "ai.whalephone.agent.DUMP"
+        const val ACT_SNAP  = "ai.whalephone.agent.SNAP"
+        const val ACT_CLICK = "ai.whalephone.agent.CLICK"
+        const val ACT_TEXT  = "ai.whalephone.agent.TEXT"
+        const val ACT_BRIDGE = "ai.whalephone.agent.BRIDGE"
     }
 }

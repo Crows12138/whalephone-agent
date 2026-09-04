@@ -18,5 +18,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "whalephone-probe"
+rootProject.name = "whalephone"
 include(":app")

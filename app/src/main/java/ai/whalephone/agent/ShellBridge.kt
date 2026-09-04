@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay

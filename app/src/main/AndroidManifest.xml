@@ -45,7 +45,7 @@
         </service>
 
         <service
-            android:name=".ProbeService"
+            android:name=".EyesAndHands"
             android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>

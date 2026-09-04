@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.graphics.Bitmap
 import android.graphics.PixelFormat

@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
@@ -18,7 +18,7 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 object Actions {
 
-    private const val TAG = "WPProbe"
+    private const val TAG = "WPEyes"
 
     /**
      * 陷阱:AccessibilityService 的全局动作没有显示器维度。
@@ -113,7 +113,7 @@ class ClipboardGuard(private val ctx: Context) {
         } finally {
             runCatching {
                 if (saved != null) cm.setPrimaryClip(saved) else cm.clearPrimaryClip()
-            }.onFailure { Log.w("WPProbe", "剪贴板还原失败: ${it.message}") }
+            }.onFailure { Log.w("WPEyes", "剪贴板还原失败: ${it.message}") }
         }
     }
 }

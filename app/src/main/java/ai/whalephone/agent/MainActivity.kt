@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.app.Activity
 import android.content.Intent
@@ -119,7 +119,7 @@ class MainActivity : Activity() {
     override fun onResume() { super.onResume(); refresh() }
 
     private fun refresh() {
-        val a11y = ProbeService.instance != null
+        val a11y = EyesAndHands.instance != null
         val alive = Privileged.shizukuAlive()
         val granted = Privileged.shizukuGranted()
         status.text = buildString {

@@ -1,4 +1,4 @@
-package ai.whalephone.probe
+package ai.whalephone.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
