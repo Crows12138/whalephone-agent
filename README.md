@@ -25,7 +25,7 @@ Android 从设计上假设「一人一屏」:输入路由、窗口焦点、输�
 │           │  从不触碰                   │  只在这块屏上动作         │
 │           │                            │                        │
 │   ┌───────┴────────────────────────────┴──────────┐             │
-│   │  ProbeService(无障碍服务)= agent 的眼睛和手    │             │
+│   │  EyesAndHands(无障碍服务)= 眼睛和手           │             │
 │   │  getWindowsOnAllDisplays  跨屏读窗口(API 30+)  │             │
 │   │  performAction(CLICK / SET_TEXT / SCROLL)      │             │
 │   └───────────────────┬────────────────────────────┘             │
@@ -140,6 +140,21 @@ DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 都是同一套协议,换 ba
 | `act.sh` | 往指定显示器发点击/输入/按键 |
 | `build.sh` | 用项目内自带的 JDK 和 SDK 构建,不依赖机器上的全局环境 |
 | `restore-a11y.sh` | 还原被测试改过的无障碍设置 |
+| `mock_llm.py` | 假 LLM,见下 |
+
+### 为什么有一个假 LLM
+
+`scripts/mock_llm.py` 实现 OpenAI 兼容的 `/v1/chat/completions`,但不调模型,
+按快照里的元素做规则决策。它存在的唯一目的是**把「链路对不对」和「模型聪不聪明」拆开验**:
+手机上跑失败时,如果不能确定是感知层没抓到元素、动作层没点中、JSON 契约对不上、
+还是模型判断错了,就没法排查。
+
+它走的路径和真模型完全一样 —— app 发 HTTP、收 `choices[0].message.content`、
+按同一份 JSON 契约解析、由同一个 `Hands` 执行。唯一不同的是产生动作的是 if-else。
+
+    python scripts/mock_llm.py
+    adb reverse tcp:8765 tcp:8765
+    adb shell am broadcast -a ai.whalephone.agent.CONFIG       --es key LLM_BASE_URL --es value "http://127.0.0.1:8765/v1"
 
 `probe/FlagProbe.java` 是独立实验:用 `app_process` 逐位测试这台机器允许哪些
 虚拟显示器标志位,不经过 app 也不经过 Shizuku,把「设备允许什么」和「代码写得对不对」
