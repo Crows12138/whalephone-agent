@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">WhalePhone Probe</string>
+    <string name="service_desc">验证多显示器读取与非触摸点击</string>
+</resources>

@@ -1,0 +1,14 @@
+tools/
+shots/
+.scratch/
+.vd_state
+.vd_live.mkv
+.snap.mkv
+.cap.mp4
+.see.log
+local.properties
+.build.log
+.backup/
+app/build/
+.gradle/
+build/
