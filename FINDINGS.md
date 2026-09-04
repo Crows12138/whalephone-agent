@@ -185,3 +185,32 @@ scrcpy 走的也是这条路(它的 `FakeContext`)。
 `OWN_FOCUS` 到底管不管用。锁屏状态下 `FocusedDisplayId` 会跟着副屏跑
 (76),但此时主屏只有 keyguard,keyguard 不争焦点,这个测试不算数。
 需要主屏上有真实前台 App 时再测一次。
+
+## 真机 App 覆盖(全程锁屏)
+
+在 `0x5e08` 的副屏上、手机保持锁屏的条件下跑通:
+
+| App | 结果 |
+|---|---|
+| 三星计算器 | 无障碍按序号点 `7 + 8 =`,ImageReader 截图确认显示 15 |
+| 淘宝 | 完整渲染且是登录态;点搜索框 → 填「AirPods Pro 2」→ 提交 → 读出带价格的结果 → 点卡片进详情页 |
+| 京东 | 完整渲染,分类导航元素可读 |
+
+主屏全程 `mDreamingLockscreen=true`。
+
+## 这一轮排掉的自造 bug
+
+- **`ACTION_SET_TEXT` 返回 true 但什么都没写。** 淘宝搜索框是自定义控件。
+  根因是没给焦点:补上 `ACTION_FOCUS` + `ACTION_CLICK` 之后直写就成了。
+  但返回值本身不可信这一点是普遍的,所以保留三级降级和回读校验。
+- **压缩嵌套可点元素时方向搞反了。** 商品卡片是「外层容器 + 内层视图」都可点、
+  标签一样,原本留外层。实测点外层 `ACTION_CLICK` 返回 true 却什么都不发生,
+  点内层才真跳转 —— 有点击回调的是靠近叶子的那个节点。
+  这个错误是静默的:返回 true、界面不动,模型只会以为自己选错了元素反复重试。
+- **`am start` 没有 `--activity-new-task` 参数**,会抛 IllegalArgumentException。
+  NEW_TASK 由 am 自己加。
+- **`topResumedActivity` 是全局的**,agent 在副屏活动时它指副屏。用它判断
+  「用户在用什么」结论会反过来 —— 而这个判断正是用来避免把用户 task 搬走的。
+  改用无障碍读 Display 0 的活动窗口。
+- **`adb shell "... &"` 起的后台进程会被 SIGHUP 带走**,`nohup` 也救不回来。
+  持屏进程必须挂在一个持续存在的 adb 连接上。
