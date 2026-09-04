@@ -17,7 +17,7 @@ import android.util.Log
  *   剪贴板 全机唯一,写之前存、写完还原。
  */
 class Hands(
-    private val svc: AccessibilityService,
+    val svc: AccessibilityService,
     val displayId: Int,
     ctx: Context,
 ) {
@@ -82,12 +82,13 @@ class Hands(
      * 整个搬到副屏来 —— 用户会看着自己的微信凭空消失。实测踩过。
      */
     fun launch(pkg: String): String {
-        if (Conflict.userIsUsing(pkg)) {
+        if (Conflict.userIsUsing(svc, pkg)) {
             return "用户此刻正在前台用 $pkg,为避免把他的界面搬走,这一步先跳过;" +
                 "换个不冲突的做法,或者 ask 请示"
         }
+        // --activity-multiple-task 是关键;NEW_TASK 由 am 自己加,没有 --activity-new-task 这个参数
         val out = Privileged.exec(
-            "am start --display $displayId --activity-multiple-task --activity-new-task " +
+            "am start --display $displayId --activity-multiple-task " +
                 "\$(cmd package resolve-activity --brief $pkg | tail -1)"
         )
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
@@ -101,15 +102,27 @@ class Hands(
 /** 资源竞争的处理集中在这里,每一条都对应一次真机上量到的冲突 */
 object Conflict {
 
-    /** 用户当前前台 App。用来避免把他正在用的 task 搬到副屏。 */
-    fun userForegroundPackage(): String? {
-        val out = Privileged.exec("dumpsys activity activities | grep -m1 topResumedActivity")
-        return Regex("""\s([A-Za-z0-9_.]+)/""").find(out)?.groupValues?.get(1)
+    /**
+     * 用户此刻在主屏上用的是哪个 App。
+     *
+     * 不走 `dumpsys activity | grep topResumedActivity`:那是**全局**的 top-resumed,
+     * agent 在副屏上活动时它指的就是副屏,拿它判断「用户在用什么」会反过来。
+     * 无障碍能按显示器取窗口,直接问 Display 0 上处于活动状态的那个窗口是谁,
+     * 既准确又不需要 shell。
+     */
+    fun userForegroundPackage(svc: AccessibilityService): String? {
+        val wins = svc.windowsOnAllDisplays.get(USER_DISPLAY) ?: return null
+        return wins.firstOrNull { it.isActive }?.root?.packageName?.toString()
+            ?: wins.firstOrNull { it.isFocused }?.root?.packageName?.toString()
     }
 
-    fun userIsUsing(pkg: String): Boolean = userForegroundPackage() == pkg
+    fun userIsUsing(svc: AccessibilityService, pkg: String): Boolean =
+        userForegroundPackage(svc) == pkg
 
     /** 副屏是否真的拿到了独立焦点。没拿到就退回「尽量少动焦点」的保守策略。 */
     fun ownFocusEffective(display: AgentDisplay?): Boolean =
         display != null && (display.flags and ShellBridge.OWN_FOCUS) != 0
+
+    /** 用户那块屏永远是 0 —— 主显示器的 id 由系统固定 */
+    const val USER_DISPLAY = 0
 }
