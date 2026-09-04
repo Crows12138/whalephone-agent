@@ -1,0 +1,123 @@
+package ai.whalephone.probe
+
+import android.app.Activity
+import android.content.Intent
+import android.graphics.Color
+import android.os.Bundle
+import android.provider.Settings
+import android.text.InputType
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import kotlin.concurrent.thread
+
+/**
+ * 配置和启停。这个界面只在主屏上,由用户主动打开 ——
+ * agent 跑起来之后不再有任何 UI 出现在主屏,进度只走通知。
+ */
+class MainActivity : Activity() {
+
+    private lateinit var status: TextView
+    private lateinit var goal: EditText
+
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        val pad = (16 * resources.displayMetrics.density).toInt()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+
+        fun label(t: String) = TextView(this).apply {
+            text = t; setPadding(0, pad / 2, 0, pad / 6); setTextColor(Color.GRAY); textSize = 12f
+        }
+
+        fun field(key: String, hint: String, def: String = "", password: Boolean = false) =
+            EditText(this).apply {
+                setText(Config.get(this@MainActivity, key, def))
+                this.hint = hint
+                setSingleLine()
+                if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                setOnFocusChangeListener { _, has ->
+                    if (!has) Config.set(this@MainActivity, key, text.toString().trim())
+                }
+            }
+
+        status = TextView(this).apply { textSize = 13f; setTextIsSelectable(true) }
+        root.addView(status)
+
+        root.addView(Button(this).apply {
+            text = "刷新状态"
+            setOnClickListener { refresh() }
+        })
+        root.addView(Button(this).apply {
+            text = "授权 Shizuku"
+            setOnClickListener { Privileged.requestPermission(); refresh() }
+        })
+        root.addView(Button(this).apply {
+            text = "打开无障碍设置"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        })
+
+        root.addView(label("LLM 接口(OpenAI 兼容)"))
+        val base = field(Config.KEY_BASE_URL, "https://api.deepseek.com/v1", "https://api.deepseek.com/v1")
+        val key = field(Config.KEY_API_KEY, "sk-...", password = true)
+        val model = field(Config.KEY_MODEL, "deepseek-chat", "deepseek-chat")
+        root.addView(base); root.addView(key); root.addView(model)
+
+        root.addView(label("任务"))
+        goal = EditText(this).apply {
+            hint = "用一句话说你要它做什么"
+            setText("打开淘宝,搜索「AirPods Pro 2」,看看第一个商品多少钱,告诉我价格")
+            minLines = 2
+        }
+        root.addView(goal)
+
+        root.addView(Button(this).apply {
+            text = "在副屏上开始"
+            setOnClickListener {
+                listOf(base to Config.KEY_BASE_URL, key to Config.KEY_API_KEY, model to Config.KEY_MODEL)
+                    .forEach { (v, k) -> Config.set(this@MainActivity, k, v.text.toString().trim()) }
+                val g = goal.text.toString().trim()
+                if (g.isBlank()) { toast("先写任务"); return@setOnClickListener }
+                AgentService.start(this@MainActivity, g)
+                toast("已启动,进度看通知")
+            }
+        })
+        root.addView(Button(this).apply {
+            text = "停止"
+            setOnClickListener {
+                startService(Intent(this@MainActivity, AgentService::class.java).setAction(AgentService.ACT_STOP))
+            }
+        })
+
+        setContentView(ScrollView(this).apply { addView(root, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) })
+        refresh()
+    }
+
+    override fun onResume() { super.onResume(); refresh() }
+
+    private fun refresh() {
+        val a11y = ProbeService.instance != null
+        val alive = Privileged.shizukuAlive()
+        val granted = Privileged.shizukuGranted()
+        status.text = buildString {
+            appendLine("无障碍服务(眼睛和手)  ${tick(a11y)}")
+            appendLine("Shizuku 在运行          ${tick(alive)}")
+            appendLine("Shizuku 已授权          ${tick(granted)}")
+            appendLine("特权桥(造副屏/按键)   ${tick(Privileged.ready)}")
+        }
+        if (alive && granted && !Privileged.ready) {
+            thread { Privileged.connect(this); runOnUiThread { refresh() } }
+        }
+    }
+
+    private fun tick(b: Boolean) = if (b) "已就绪" else "未就绪"
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+}

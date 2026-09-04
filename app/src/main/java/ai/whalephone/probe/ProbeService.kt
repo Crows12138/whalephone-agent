@@ -7,42 +7,56 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 
 private const val TAG = "WPProbe"
 
 /**
- * 探针无障碍服务。只验证两个假设:
- *   H1  getWindowsOnAllDisplays() 能否读到非焦点显示器上的窗口
- *   H2  performAction(ACTION_CLICK) 是否会抢走全局焦点
- * 通过 adb 广播触发,结果打到 logcat。
+ * 无障碍服务:agent 的眼睛和手。
+ *
+ * 感知和操作都在这里,因为只有 AccessibilityService 能跨显示器读窗口
+ * (`getWindowsOnAllDisplays()`,API 30+)。ADB 侧的 `uiautomator dump --display`
+ * 参数被系统忽略,只能读全局焦点所在的屏 —— 而「用户正在用手机」恰恰意味着
+ * 焦点在主屏。这是 on-device 服务成为必需品而非可选项的原因。
+ *
+ * 广播接口供 adb 驱动测试:
+ *   DUMP                          列出所有显示器及其窗口
+ *   SNAP  --ei display N          打印该屏的快照(模型看到的文本)
+ *   CLICK --ei display N --es text S | --ei index I
+ *   TEXT  --ei display N --ei index I --es text S
  */
 class ProbeService : AccessibilityService() {
 
+    private val clipboard by lazy { ClipboardGuard(this) }
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, i: Intent?) {
+            val d = i?.getIntExtra("display", -1) ?: -1
             when (i?.action) {
                 ACT_DUMP  -> dumpAllDisplays()
-                ACT_CLICK -> clickByText(
-                    i.getIntExtra("display", -1),
-                    i.getStringExtra("text") ?: ""
-                )
-                ACT_TREE  -> dumpTree(i.getIntExtra("display", -1))
+                ACT_SNAP  -> snap(d)
+                ACT_CLICK -> click(d, i.getStringExtra("text"), i.getIntExtra("index", -1))
+                ACT_TEXT  -> setText(d, i.getIntExtra("index", -1), i.getStringExtra("text") ?: "")
+                ACT_BRIDGE -> Thread { bridgeSelfTest() }.start()
             }
         }
     }
 
     override fun onServiceConnected() {
+        instance = this
         Log.i(TAG, "=== ProbeService connected ===")
-        val f = IntentFilter().apply {
-            addAction(ACT_DUMP); addAction(ACT_CLICK); addAction(ACT_TREE)
-        }
-        registerReceiver(receiver, f, Context.RECEIVER_EXPORTED)
+        registerReceiver(
+            receiver,
+            IntentFilter().apply {
+                addAction(ACT_DUMP); addAction(ACT_SNAP); addAction(ACT_CLICK)
+                addAction(ACT_TEXT); addAction(ACT_BRIDGE)
+            },
+            Context.RECEIVER_EXPORTED,
+        )
         dumpAllDisplays()
     }
 
     override fun onDestroy() {
+        instance = null
         runCatching { unregisterReceiver(receiver) }
         super.onDestroy()
     }
@@ -50,96 +64,105 @@ class ProbeService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
-    /** H1:枚举所有显示器上的窗口 */
+    // ---- 广播处理 ----
+
     private fun dumpAllDisplays() {
-        Log.i(TAG, "---- H1 getWindowsOnAllDisplays ----")
         val all = windowsOnAllDisplays
-        Log.i(TAG, "显示器数量 = ${all.size()}")
+        Log.i(TAG, "---- 显示器 ${all.size()} 块  全局焦点屏=${activeDisplay()} ----")
         for (i in 0 until all.size()) {
-            val displayId = all.keyAt(i)
+            val id = all.keyAt(i)
             val wins = all.valueAt(i)
-            Log.i(TAG, "  Display $displayId : ${wins.size} 个窗口")
+            Log.i(TAG, "  Display $id : ${wins.size} 个窗口")
             wins.forEach { w ->
-                val pkg = w.root?.packageName ?: "(无root)"
-                Log.i(TAG, "    type=${w.type} focused=${w.isFocused} active=${w.isActive} pkg=$pkg title=${w.title}")
+                Log.i(TAG, "    type=${w.type} focused=${w.isFocused} active=${w.isActive} " +
+                        "pkg=${w.root?.packageName ?: "-"} title=${w.title}")
             }
         }
-        Log.i(TAG, "---- H1 end ----")
+        Log.i(TAG, "---- end ----")
     }
 
-    /** 打印某个显示器上第一个窗口的可点击节点 */
-    private fun dumpTree(displayId: Int) {
-        Log.i(TAG, "---- TREE display=$displayId ----")
-        val wins = windowsOnAllDisplays.get(displayId)
-        if (wins == null) { Log.w(TAG, "该显示器没有窗口"); return }
-        wins.forEach { w ->
-            val root = w.root ?: return@forEach
-            Log.i(TAG, "  window pkg=${root.packageName}")
-            walk(root, 0) { n, d ->
-                if (n.isClickable || !n.text.isNullOrEmpty() || !n.contentDescription.isNullOrEmpty()) {
-                    Log.i(TAG, "    ${" ".repeat(d)}[${n.className?.toString()?.substringAfterLast('.')}]" +
-                            " text=${n.text} desc=${n.contentDescription} clickable=${n.isClickable}")
-                }
-            }
+    private fun snap(displayId: Int) {
+        val s = snapshotOf(displayId)
+        Log.i(TAG, "---- SNAP display=$displayId ----")
+        s.render().lineSequence().forEach { if (it.isNotBlank()) Log.i(TAG, it) }
+        Log.i(TAG, "---- 共 ${s.elements.size} 个元素 ----")
+    }
+
+    private fun click(displayId: Int, text: String?, index: Int) {
+        val before = activeDisplay()
+        val s = snapshotOf(displayId)
+        val el = when {
+            index >= 0 -> s.byIndex(index)
+            text != null -> s.elements.firstOrNull { it.text == text || it.desc == text }
+            else -> null
         }
-        Log.i(TAG, "---- TREE end ----")
-    }
-
-    /** H2:按文本找节点并 performAction(CLICK),记录焦点变化 */
-    private fun clickByText(displayId: Int, text: String) {
-        Log.i(TAG, "---- H2 click display=$displayId text='$text' ----")
-        val before = focusedDisplay()
-        Log.i(TAG, "  点击前 焦点显示器 = $before")
-
-        val wins = windowsOnAllDisplays.get(displayId)
-        if (wins == null) { Log.w(TAG, "  该显示器没有窗口"); return }
-
-        var target: AccessibilityNodeInfo? = null
-        outer@ for (w in wins) {
-            val root = w.root ?: continue
-            walk(root, 0) { n, _ ->
-                if (target == null &&
-                    (n.text?.toString() == text || n.contentDescription?.toString() == text)) {
-                    target = n
-                }
-            }
-            if (target != null) break@outer
+        if (el == null) {
+            Log.w(TAG, "CLICK 找不到目标 (display=$displayId index=$index text=$text), " +
+                    "该屏共 ${s.elements.size} 个元素")
+            return
         }
-
-        if (target == null) { Log.w(TAG, "  找不到节点 '$text'"); return }
-
-        var clickable: AccessibilityNodeInfo? = target
-        while (clickable != null && !clickable.isClickable) clickable = clickable.parent
-        val node = clickable ?: target!!
-
-        val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        Log.i(TAG, "  performAction(CLICK) 返回 = $ok  (节点 ${node.className})")
-
-        Thread.sleep(600)
-        val after = focusedDisplay()
-        Log.i(TAG, "  点击后 焦点显示器 = $after")
-        Log.i(TAG, "  ==> 焦点${if (before == after) "未被抢走 ✅" else "被抢走了 ❌ ($before -> $after)"}")
-        Log.i(TAG, "---- H2 end ----")
+        Actions.click(el)
+        Thread.sleep(500)
+        val after = activeDisplay()
+        Log.i(TAG, "焦点 $before -> $after  ${if (before == after) "未被抢走 OK" else "被抢走了"}")
     }
 
-    /** 用 isActive 推断当前活跃(焦点)显示器 */
-    private fun focusedDisplay(): Int {
+    private fun setText(displayId: Int, index: Int, text: String) {
+        val h = hands(displayId)
+        h.snapshot()
+        Log.i(TAG, "TEXT [$index] <- 「$text」  ${h.setText(index, text)}")
+    }
+
+    /** 每块屏一双手,复用同一份快照缓存 */
+    private val handsByDisplay = HashMap<Int, Hands>()
+    private fun hands(displayId: Int): Hands =
+        handsByDisplay.getOrPut(displayId) { Hands(this, displayId, this) }
+
+    /**
+     * 无头自检:把特权桥拉起来,造一块 agent 屏,把实际拿到的标志位打出来。
+     * 不需要解锁、不需要人看着 —— 这条路上每一步能不能成都是设备相关的,
+     * 必须在真机上量,不能靠读文档下结论。
+     */
+    private fun bridgeSelfTest() {
+        Log.i(TAG, "---- 特权桥自检 ----")
+        Log.i(TAG, "Shizuku 在运行=${Privileged.shizukuAlive()} 已授权=${Privileged.shizukuGranted()}")
+        val ok = Privileged.connect(this)
+        Log.i(TAG, "桥连上=$ok")
+        if (!ok) { Log.i(TAG, "---- 自检中止 ----"); return }
+        Log.i(TAG, "whoami: " + Privileged.exec("id").trim())
+
+        val m = resources.displayMetrics
+        val d = AgentDisplay.create(m.widthPixels, m.heightPixels, m.densityDpi)
+        if (d == null) { Log.e(TAG, "造屏失败"); return }
+        Log.i(TAG, "副屏 id=${d.displayId} 标志位=0x${d.flags.toString(16)} 保证=${d.guarantees()}")
+        Log.i(TAG, "期望标志位=0x${ShellBridge.AGENT_DISPLAY_FLAGS.toString(16)} " +
+                (if (d.flags == ShellBridge.AGENT_DISPLAY_FLAGS) "全拿到" else "降级了"))
+
+        Thread.sleep(1500)
+        Log.i(TAG, "系统侧: " + Privileged.exec("dumpsys display | grep -A2 'mDisplayId=${d.displayId}'").trim().take(400))
+        Log.i(TAG, "无障碍能否看到这块屏: " + windowsOnAllDisplays.let { all ->
+            (0 until all.size()).joinToString(", ") { "${all.keyAt(it)}(${all.valueAt(it).size}窗口)" }
+        })
+        Log.i(TAG, "截图: " + if (d.captureTo("/sdcard/wp_vd.png")) "成功" else "失败(屏上还没有内容是正常的)")
+        d.release()
+        Log.i(TAG, "---- 自检结束,副屏已销毁 ----")
+    }
+
+    /** 当前活跃(全局焦点)显示器 */
+    private fun activeDisplay(): Int {
         val all = windowsOnAllDisplays
-        for (i in 0 until all.size()) {
-            if (all.valueAt(i).any { it.isActive }) return all.keyAt(i)
-        }
+        for (i in 0 until all.size()) if (all.valueAt(i).any { it.isActive }) return all.keyAt(i)
         return -1
     }
 
-    private fun walk(n: AccessibilityNodeInfo?, depth: Int, f: (AccessibilityNodeInfo, Int) -> Unit) {
-        if (n == null || depth > 40) return
-        f(n, depth)
-        for (i in 0 until n.childCount) walk(n.getChild(i), depth + 1, f)
-    }
-
     companion object {
+        /** agent 侧唯一的入口。无障碍服务全进程只有一个实例,生命周期由系统托管。 */
+        @Volatile var instance: ProbeService? = null
+
         const val ACT_DUMP  = "ai.whalephone.probe.DUMP"
+        const val ACT_SNAP  = "ai.whalephone.probe.SNAP"
         const val ACT_CLICK = "ai.whalephone.probe.CLICK"
-        const val ACT_TREE  = "ai.whalephone.probe.TREE"
+        const val ACT_TEXT  = "ai.whalephone.probe.TEXT"
+        const val ACT_BRIDGE = "ai.whalephone.probe.BRIDGE"
     }
 }
