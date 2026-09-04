@@ -1,77 +1,137 @@
 # WhalePhone Agent
 
-在机主正常使用手机的同时,agent 在**同一台设备**上完成任务,全程不占用用户的屏幕、焦点与键盘。
+在机主正常使用手机的同时,agent 在**同一台设备**上完成任务,全程不碰用户的屏幕、焦点、
+键盘和剪贴板。手机锁屏揣在兜里时,agent 照常工作。
+
+不需要电脑。配置一次之后,手机断开一切外部连接,agent 自己在机器上跑。
 
 ## 核心问题
 
-Android 从设计上假设「一人一屏」:输入路由、窗口焦点、输入法目标,每一层都继承这个假设。
-让 agent 与用户并发使用同一台手机,需要在系统层面把两者隔离开。
+Android 从设计上假设「一人一屏」:输入路由、窗口焦点、输入法目标、导航键,每一层都继承
+这个假设。让 agent 和用户并发使用同一台手机,不是加一个后台线程的事,而是要在系统层面
+把两者隔离开 —— 而系统提供的隔离能力,大半锁在 `signature|privileged` 权限后面。
 
 ## 架构
 
 ```
-┌─────────────────────────────┐     ┌──────────────────┐
-│          手机                │     │      云端         │
-│  ┌────────┐   ┌───────────┐ │     │                  │
-│  │ 主显示器│   │ 虚拟显示器 │ │     │   规划 / VLM      │
-│  │ Display0│   │ Display N │ │◄───►│                  │
-│  │  用户   │   │   agent   │ │     │                  │
-│  └────────┘   └───────────┘ │     └──────────────────┘
-│         ▲            ▲       │
-│         │            │       │
-│    ┌────┴────────────┴────┐ │
-│    │  无障碍服务(感知+操作) │ │
-│    │ getWindowsOnAllDisplays│ │
-│    │ performAction(CLICK)   │ │
-│    └───────────────────────┘ │
-└─────────────────────────────┘
+┌──────────────────────── 手机(自足运行)────────────────────────┐
+│                                                                 │
+│   ┌───────────────┐            ┌───────────────┐                │
+│   │  Display 0    │            │  Display N    │                │
+│   │  主显示器      │            │  agent 副屏    │                │
+│   │  用户在用      │            │  0x5e08        │                │
+│   └───────────────┘            └───────────────┘                │
+│           ▲                            ▲                        │
+│           │  从不触碰                   │  只在这块屏上动作         │
+│           │                            │                        │
+│   ┌───────┴────────────────────────────┴──────────┐             │
+│   │  ProbeService(无障碍服务)= agent 的眼睛和手    │             │
+│   │  getWindowsOnAllDisplays  跨屏读窗口(API 30+)  │             │
+│   │  performAction(CLICK / SET_TEXT / SCROLL)      │             │
+│   └───────────────────┬────────────────────────────┘             │
+│                       │                                          │
+│   ┌───────────────────┴──────────┐  ┌──────────────────────────┐│
+│   │  AgentService(前台服务)      │  │ ShellBridge(shell UID)   ││
+│   │   Perception → LLM → Hands   │  │  Shizuku 拉起             ││
+│   │   通知 = 唯一对用户的出口      │  │  造受信副屏 / 带屏号按键   ││
+│   └───────────────────┬──────────┘  └──────────────────────────┘│
+└───────────────────────┼──────────────────────────────────────────┘
+                        │ HTTPS
+                 ┌──────┴───────┐
+                 │  LLM(任意    │
+                 │  OpenAI 兼容) │
+                 └──────────────┘
 ```
 
-手机是眼睛和手,云端是大脑。感知与操作都走无障碍服务,不注入触摸事件。
+副屏的六个标志位 `0x5e08`,每一位都对应一个实测出来的冲突:
+
+| 标志位 | 解决什么 |
+|---|---|
+| `TRUSTED` | 不受信的屏只能启自己 uid 的 Activity,淘宝微信都上不去 |
+| `OWN_CONTENT_ONLY` | 不镜像主屏,用户屏上不会多出任何东西 |
+| `SHOULD_SHOW_SYSTEM_DECORATIONS` | 副屏有自己的启动器和系统装饰 |
+| `OWN_FOCUS` | 副屏自己维护焦点,agent 点什么都不把焦点从用户屏拽走 |
+| `OWN_DISPLAY_GROUP` | `ALWAYS_UNLOCKED` 的前置条件 |
+| `ALWAYS_UNLOCKED` | 用户锁屏后 agent 继续干活,而不是只能看见 keyguard |
+
+## 资源竞争:七类冲突和各自的处理
+
+并发用一台手机,冲突不在 CPU 和内存,在那些**全机只有一份**的东西上。
+
+| 冲突 | 现象 | 处理 |
+|---|---|---|
+| 触摸注入 | `dispatchGesture` 把手势画在真实屏幕上 | 只用 `performAction`,不合成触摸 |
+| 输入法 | 整机一个 IME,`mDisplayIdToShowIme` 恒为 0 | 文字走 `ACTION_SET_TEXT`,永不调用输入法 |
+| 导航键 | `performGlobalAction` 没有显示器维度,会让用户的 App 后退一页 | 走 `input -d <屏号> keyevent` |
+| 全局焦点 | 焦点指针被副屏抢走 | `OWN_FOCUS` 标志位从结构上消除 |
+| 剪贴板 | agent 复制覆盖用户正在用的内容 | `ClipboardGuard` 用完立刻还原 |
+| task 搬迁 | 启动用户正在前台用的 App,系统把他的 task 搬到副屏 | 启动前先查用户前台包名,冲突就不启 |
+| 副屏销毁 | 保留内容会让副屏上的 App 一股脑掉到主屏 | 主动 release,task 随屏消失 |
 
 ## 为什么不用别的方案
 
 | 方案 | 否决原因 |
 |---|---|
-| PC + ADB + scrcpy 镜像主屏 | 占用用户屏幕,且运行时依赖电脑 |
+| PC + ADB + scrcpy | 运行时依赖电脑,拔线就死;而题目要的是跑在手机上 |
 | 无障碍 `dispatchGesture` | 手势画在真实屏幕上,必然打扰 |
+| 纯 app 自己造虚拟屏 | 不受信的屏只能启自己 uid 的 Activity,第三方 App 上不去 |
+| `overlay_display_devices` | 开发者选项的模拟副屏会在真实屏幕上画一个窗口,直接盖住用户 |
 | 多用户 / 工作资料 | 本机 `Maximum supported switchable users: 1`,且切换用户会切屏 |
-| 应用分身容器 | 渲染目标问题未解决,不比虚拟显示器更优 |
 | 云手机 | 违背「同一台手机」的前提 |
-| `uiautomator dump --display` | **参数被系统忽略**,只能读全局焦点所在的屏(实测) |
+| root | 绝大多数用户不会为一个 agent 解锁 bootloader |
 
 ## 部署
 
-见 `HARNESS.md`(开发测试环境)与下方步骤。
+### 一次性配置(手机上完成,不需要电脑)
 
-### 环境变量
+1. 装 [Shizuku](https://shizuku.rikka.app/),按它的引导用**无线调试**启动
+   (Android 11+ 支持,不需要电脑)
+2. 装本项目的 APK,打开后点「授权 Shizuku」
+3. 点「打开无障碍设置」,启用 WhalePhone
+   - Android 13+ 会拦截侧载应用的无障碍权限。系统会提示「出于安全考虑,此设置当前不可用」,
+     在应用信息页右上角菜单里选「允许受限设置」
+4. 填 LLM 接口的三个配置项,写任务,点「在副屏上开始」
 
-| 变量 | 说明 |
+### 开发者:从源码构建
+
+```bash
+git clone <repo>
+cd whalephone
+./gradlew assembleDebug            # 产物在 app/build/outputs/apk/debug/
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Windows 上如果项目路径含非 ASCII 字符,AGP 会拒绝构建。用 `mklink /J C:\wp <项目路径>`
+建一个 ASCII 的目录联接,对着联接构建。
+
+### 配置项
+
+手机上没有环境变量,等价物是 app 内的三个配置项,存在 SharedPreferences 里。
+也可以用 adb 灌进去,方便无人值守测试。
+
+| 键 | 说明 | 默认值 |
+|---|---|---|
+| `LLM_BASE_URL` | OpenAI 兼容接口的 base url | `https://api.deepseek.com/v1` |
+| `LLM_API_KEY` | 接口密钥 | 无,必填 |
+| `LLM_MODEL` | 模型名 | `deepseek-chat` |
+
+DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 都是同一套协议,换 base_url 和 model 即可。
+
+## 开发夹具
+
+`scripts/` 下是开发期用的工具,不参与运行时:
+
+| 脚本 | 用途 |
 |---|---|
-| `LLM_API_KEY` | 云端模型密钥 |
-| `LLM_BASE_URL` | 模型服务地址 |
+| `lib.sh` | 共享环境变量。Windows / Git Bash 的路径改写坑都在这里处理 |
+| `vd2.sh` | 起/停 agent 副屏,拉截图 |
+| `see.sh` | 截主屏 |
+| `act.sh` | 往指定显示器发点击/输入/按键 |
+| `build.sh` | 用项目内自带的 JDK 和 SDK 构建,不依赖机器上的全局环境 |
+| `restore-a11y.sh` | 还原被测试改过的无障碍设置 |
 
-### 步骤
+`probe/FlagProbe.java` 是独立实验:用 `app_process` 逐位测试这台机器允许哪些
+虚拟显示器标志位,不经过 app 也不经过 Shizuku,把「设备允许什么」和「代码写得对不对」
+分开。它同时也是开发期的持屏工具。
 
-1. 手机开启开发者选项与 USB 调试
-2. `adb install -r app-debug.apk`
-3. 放行受限设置(Android 13+ 对侧载应用的无障碍限制):
-   `adb shell appops set ai.whalephone.probe ACCESS_RESTRICTED_SETTINGS allow`
-4. 启用无障碍服务(或在系统设置里手动开启)
-5. 启动虚拟显示器
-
-## 实测结论
-
-设备侧的全部实测数据见 [`FINDINGS.md`](FINDINGS.md),包括:
-
-- 虚拟显示器上 10/10 真实 App(微信/淘宝/美团/京东等)可正常启动
-- 焦点抢夺**不影响**用户输入(键盘不掉、按键不丢),实测数据在案
-- 已识别并量化三类「抢资源」冲突
-
-## 开发
-
-    bash scripts/build.sh build     # 编译
-    bash scripts/build.sh install   # 安装
-    bash scripts/vd.sh start [pkg]  # 起虚拟屏
-    bash scripts/see.sh [id]        # 截图
-    bash scripts/act.sh <id> ...    # 操作
+实测记录在 [FINDINGS.md](FINDINGS.md),包括踩过的坑和被推翻的结论。
