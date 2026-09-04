@@ -1,14 +1,23 @@
+# 工具链:JDK / Android SDK / scrcpy,几百 MB,不进仓库
 tools/
-shots/
-.scratch/
-.vd_state
-.vd_live.mkv
-.snap.mkv
-.cap.mp4
-.see.log
-local.properties
-.build.log
-.backup/
+# 构建产物
+build/
 app/build/
 .gradle/
-build/
+local.properties
+# 运行期临时文件
+.vd*.png
+.vd*.mkv
+.vd*_state
+.snap.mkv
+.cap.mp4
+.hold.log
+.f.log
+.build.log
+probe/out/
+probe/classes.dex
+# 设备现场备份,和具体手机绑定
+.backup/
+.scratch/
+.see.log
+shots/
