@@ -86,23 +86,30 @@ object Perception {
      * 只能按位置和文字在事后对消。
      */
     private fun prune(raw: List<Raw>): List<Raw> {
-        val hits = raw.filter { it.clickable || it.editable || it.scrollable }
-        return raw.filter { r ->
+        val hits = raw.withIndex().filter { (_, r) -> r.clickable || r.editable || r.scrollable }
+        val drop = HashSet<Int>()
+
+        raw.forEachIndexed { i, r ->
             val t = r.text?.trim().orEmpty()
-            val inner = r.clickable || r.editable || r.scrollable
-            if (!inner) {
+            if (r.clickable || r.editable || r.scrollable) {
+                if (t.isEmpty()) return@forEachIndexed
+                // 商品卡片这类结构是「外层容器 + 内层视图」,两个都可点、标签一样。
+                // 留内层:实测淘宝搜索结果里点外层 ACTION_CLICK 返回 true 却什么都不发生,
+                // 点内层才真的跳转 —— 有自己点击回调的是靠近叶子的那个节点。
+                // 遍历是先序的,所以下标更大的就是后代。
+                val hasInnerTwin = hits.any { (j, h) ->
+                    j > i && r.bounds.contains(h.bounds) &&
+                        h.text?.trim()?.let { it.isNotEmpty() && t.contains(it) } == true
+                }
+                if (hasInnerTwin) drop += i
+            } else {
                 // 纯文本:被某个可交互元素在位置和文字上都盖住了,就不单独出行
-                if (t.isEmpty()) return@filter false
-                return@filter hits.none { h -> h.bounds.contains(r.bounds) && h.text?.contains(t) == true }
-            }
-            // 嵌套的可点元素:商品卡片常见「外层容器 + 内层视图」,标签一模一样。
-            // 内层没带新信息就丢掉,只留能点到整张卡的那个。
-            if (t.isEmpty()) return@filter true
-            hits.none { h ->
-                h !== r && h.bounds.contains(r.bounds) && h.bounds != r.bounds &&
-                    h.text?.contains(t) == true && h.text.length >= t.length
+                if (t.isEmpty()) { drop += i; return@forEachIndexed }
+                val covered = hits.any { (_, h) -> h.bounds.contains(r.bounds) && h.text?.contains(t) == true }
+                if (covered) drop += i
             }
         }
+        return raw.filterIndexed { i, _ -> i !in drop }
     }
 
     private class Raw(
