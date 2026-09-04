@@ -125,6 +125,7 @@ Windows 上如果项目路径含非 ASCII 字符,AGP 会拒绝构建。用 `mkli
 | `LLM_BASE_URL` | OpenAI 兼容接口的 base url | `https://api.deepseek.com/v1` |
 | `LLM_API_KEY` | 接口密钥 | 无,必填 |
 | `LLM_MODEL` | 模型名 | `deepseek-chat` |
+| `DEMO_FEED` | 设为 `1` 时任务期间把副屏画面写成 PNG,给取景窗用 | 关 |
 
 DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 都是同一套协议,换 base_url 和 model 即可。
 
@@ -141,6 +142,7 @@ DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 都是同一套协议,换 ba
 | `build.sh` | 用项目内自带的 JDK 和 SDK 构建,不依赖机器上的全局环境 |
 | `restore-a11y.sh` | 还原被测试改过的无障碍设置 |
 | `mock_llm.py` | 假 LLM,见下 |
+| `vd_view.py` | 副屏取景窗:把 agent 那块看不见的屏显示在电脑上,录演示视频用 |
 
 ### 为什么有一个假 LLM
 
@@ -161,3 +163,5 @@ DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 都是同一套协议,换 ba
 分开。它同时也是开发期的持屏工具。
 
 实测记录在 [FINDINGS.md](FINDINGS.md),包括踩过的坑和被推翻的结论。
+演示任务的选型理由和拍摄脚本在 [TASK-DESIGN.md](TASK-DESIGN.md),
+技术选型的完整论证在 [TECH-CHOICES.md](TECH-CHOICES.md)。

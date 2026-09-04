@@ -27,6 +27,7 @@ class AgentService : Service() {
 
     private var display: AgentDisplay? = null
     private var worker: Thread? = null
+    private var feed: Thread? = null
     @Volatile private var stopping = false
 
     override fun onBind(i: Intent?) = null
@@ -70,6 +71,8 @@ class AgentService : Service() {
             note("副屏 ${d.displayId} 就绪 · ${d.guarantees()}")
         }
 
+        startFeedIfAsked()
+
         val hands = Hands(probe, displayId, this)
         val agent = Agent(hands, llm, goal)
         agent.onStep = { s -> if (!stopping) update("第 ${s.n} 步 · ${s.action}", s.result.take(80)) }
@@ -96,6 +99,26 @@ class AgentService : Service() {
             return
         }
         finish(out.message)
+    }
+
+    /**
+     * 演示取景窗。副屏是看不见的 —— 这正是它的意义,但也意味着录演示视频时
+     * 没法证明 agent 真的在做事。打开这个开关,任务期间把副屏的画面按秒写成 PNG,
+     * 电脑端 `scripts/vd_view.py` 拉过去显示,录成画中画。
+     *
+     * 它只是一个取景窗:agent 不依赖它,关掉照常工作。数据线在演示里只用来
+     * 传这张图,不参与 agent 的任何一步。
+     */
+    private fun startFeedIfAsked() {
+        if (Config.get(this, KEY_DEMO_FEED) != "1") return
+        val d = display ?: run { Log.w(TAG, "开发模式下没有自己的副屏,取景窗开不了"); return }
+        feed = thread(name = "wp-feed") {
+            while (!stopping && worker?.isAlive != false) {
+                runCatching { d.captureTo(FEED_PATH) }
+                Thread.sleep(700)
+            }
+        }
+        Log.i(TAG, "取景窗已开 -> $FEED_PATH")
     }
 
     /**
@@ -196,6 +219,8 @@ class AgentService : Service() {
         const val ACT_STOP = "ai.whalephone.agent.STOP"
         const val EXTRA_GOAL = "goal"
         const val KEY_DEV_DISPLAY = "DEV_DISPLAY_ID"
+        const val KEY_DEMO_FEED = "DEMO_FEED"
+        const val FEED_PATH = "/sdcard/Download/wp_vd.png"
 
         fun start(ctx: Context, goal: String) {
             ctx.startForegroundService(Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))

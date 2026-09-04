@@ -88,6 +88,7 @@ class Agent(
         "scroll"     -> hands.scroll(a.getInt("index"), a.optString("direction", "forward") == "forward")
         "launch"     -> hands.launch(a.getString("package"))
         "back"       -> hands.back()
+        "home"       -> hands.home()
         "wait"       -> { Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下" }
         else         -> "不认识的动作 $name"
     }.also { Thread.sleep(600) }   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
@@ -144,6 +145,7 @@ class Agent(
               scroll      index, direction("forward" 往下 / "backward" 往上)
               launch      package(应用包名)
               back        (无参数,只在副屏上返回)
+              home        (无参数,回副屏自己的桌面;界面乱了就用它重来)
               wait        ms
               done        summary(任务结果,说清楚查到/做成了什么)
               ask         question(需要主人拍板的事)
@@ -153,6 +155,7 @@ class Agent(
             - 你没有键盘,文字一律用 set_text 写进输入框。
             - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
             - 界面连着几步没变,说明你的做法不起作用,换一个,别原地重复。
+            - 副屏上可能还停着上一个任务留下的界面。不确定自己在哪就先 home,再 launch。
             - 目标达成就立刻 done,不要多点。
         """.trimIndent()
     }

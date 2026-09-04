@@ -244,3 +244,24 @@ agent 的可工作时间等于用户的亮屏时间,而这恰好就是题目要�
 
 代价写清楚:时效性由用户的使用习惯决定。一整夜不碰手机就一轮都不跑。对「盯降价」
 这类需求可以接受,对「几点几分必须做完」的需求不适用。
+
+## HOME 键:按键无效,显式 intent 有效
+
+`input -d <屏> keyevent 4`(返回)是按屏走的,实测有效 —— 能让副屏上的淘宝
+从商品详情页退回搜索结果页,主屏不受影响。
+
+但 `input -d <屏> keyevent 3`(HOME)**对副屏无效**:发下去之后副屏上的计算器
+纹丝不动(`focused=true active=true` 仍是计算器),同时主屏也没被送回桌面。
+原因是 HOME 由窗口策略层处理,那一层认的是全局焦点屏,不认事件带的屏号。
+
+有效的写法是显式启动这块屏自己的桌面 Activity:
+
+```
+am start --display <屏> -a android.intent.action.MAIN -c android.intent.category.HOME
+```
+
+发完副屏的焦点窗口变成 `com.sec.android.app.launcher / One UI 主屏幕`,
+主屏保持 `mDreamingLockscreen=true` 不变。
+
+这条对长时任务有用:下一轮开始时副屏往往还停在上一轮的界面,模型需要一个
+「重来」的手段,只靠连按返回遇到不响应返回的页面就卡死。

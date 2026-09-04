@@ -65,7 +65,8 @@ class EyesAndHands : AccessibilityService() {
             },
             Context.RECEIVER_EXPORTED,
         )
-        screenOn = Watch.attach(this)
+        // onServiceConnected 在服务重连时会再次调用,不去重会越挂越多个接收器
+        if (screenOn == null) screenOn = Watch.attach(this)
         dumpAllDisplays()
     }
 

@@ -77,6 +77,26 @@ class Hands(
     fun back() = key(4)
 
     /**
+     * 回到副屏自己的桌面。长时任务的下一轮开始时,副屏上往往还停在上一轮的界面,
+     * 模型需要一个「重来」的手段,否则只能连按返回,遇到不响应返回的页面就卡死。
+     *
+     * 不用 performGlobalAction(HOME) —— 它没有显示器维度,会把**用户**送回桌面。
+     * 也不用 `input -d <屏> keyevent 3`:实测这条对副屏无效(计算器纹丝不动),
+     * HOME 键由窗口策略层处理,那一层认的是全局焦点屏而不是事件带的屏号。
+     * 有效的是显式启动这块屏自己的桌面 Activity。
+     *
+     * 注意返回键不一样:`input -d <屏> keyevent 4` 是按屏走的,实测有效。
+     */
+    fun home(): String {
+        val out = Privileged.exec(
+            "am start --display $displayId -a android.intent.action.MAIN " +
+                "-c android.intent.category.HOME"
+        )
+        return if (out.contains("Error") || out == "NO_BRIDGE") "回桌面失败: ${out.trim()}"
+        else "已回到副屏桌面"
+    }
+
+    /**
      * 把 App 启到副屏。--activity-multiple-task 是关键:
      * 如果目标 App 已经在用户那块屏上开着,不加这个参数系统会把用户正在用的那个 task
      * 整个搬到副屏来 —— 用户会看着自己的微信凭空消失。实测踩过。
