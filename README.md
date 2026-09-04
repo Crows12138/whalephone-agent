@@ -1,7 +1,7 @@
 # WhalePhone Agent
 
 在机主正常使用手机的同时,agent 在**同一台设备**上完成任务,全程不碰用户的屏幕、焦点、
-键盘和剪贴板。手机锁屏揣在兜里时,agent 照常工作。
+键盘和剪贴板。手机锁着但屏幕亮着时(比如刚看完消息还没息屏),agent 一样在干活。
 
 不需要电脑。配置一次之后,手机断开一切外部连接,agent 自己在机器上跑。
 
@@ -52,7 +52,18 @@ Android 从设计上假设「一人一屏」:输入路由、窗口焦点、输�
 | `SHOULD_SHOW_SYSTEM_DECORATIONS` | 副屏有自己的启动器和系统装饰 |
 | `OWN_FOCUS` | 副屏自己维护焦点,agent 点什么都不把焦点从用户屏拽走 |
 | `OWN_DISPLAY_GROUP` | `ALWAYS_UNLOCKED` 的前置条件 |
-| `ALWAYS_UNLOCKED` | 用户锁屏后 agent 继续干活,而不是只能看见 keyguard |
+| `ALWAYS_UNLOCKED` | 锁屏后 agent 继续干活,而不是只能看见 keyguard(息屏不行,见下) |
+
+### 一条硬边界:副屏和主屏共用电源组
+
+实测这台机器 `dumpsys power` 只有 `groupId: 0`。`OWN_DISPLAY_GROUP` 分的是窗口意义上的
+显示器组,不是电源组;`DEVICE_DISPLAY_GROUP`(1<<15)也没分出独立电源组。所以**主屏一息屏,
+副屏跟着灭,上面的 Activity 被停掉**。想让副屏单独亮着也不行:从副屏的 display context
+取 `SCREEN_BRIGHT_WAKE_LOCK`,连主屏一起点亮了。
+
+结论:**agent 的可工作时间等于用户的亮屏时间。** 这个约束和题目是对齐的 —— 要解决的
+本来就是「用户正在用手机的时候」,而那时候屏幕必然亮着。副屏蹭的是已经付过电费的那块屏,
+手机闲置时 agent 一点电都不耗。长时任务因此改成**亮屏触发**而不是定时轮询。
 
 ## 资源竞争:七类冲突和各自的处理
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      只对回环地址放行明文。开发期用 `adb reverse` 把电脑上的假 LLM 服务
+      映射到手机的 127.0.0.1,用来单独验证决策循环这条链路。
+      真实的 LLM 走 HTTPS,不受这条影响。
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

@@ -37,6 +37,19 @@ class EyesAndHands : AccessibilityService() {
                 ACT_CLICK -> click(d, i.getStringExtra("text"), i.getIntExtra("index", -1))
                 ACT_TEXT  -> setText(d, i.getIntExtra("index", -1), i.getStringExtra("text") ?: "")
                 ACT_BRIDGE -> Thread { bridgeSelfTest() }.start()
+                ACT_RUN -> {
+                    val g = i.getStringExtra("goal").orEmpty()
+                    Log.i(TAG, "收到任务: $g")
+                    if (g.isNotBlank()) AgentService.start(this@EyesAndHands, g)
+                }
+                ACT_CONFIG -> {
+                    val k = i.getStringExtra("key").orEmpty()
+                    val v = i.getStringExtra("value").orEmpty()
+                    if (k.isNotBlank()) {
+                        Config.set(this@EyesAndHands, k, v)
+                        Log.i(TAG, "配置 $k = ${if (k.contains("KEY")) "***" else v}")
+                    }
+                }
             }
         }
     }
@@ -48,16 +61,20 @@ class EyesAndHands : AccessibilityService() {
             receiver,
             IntentFilter().apply {
                 addAction(ACT_DUMP); addAction(ACT_SNAP); addAction(ACT_CLICK)
-                addAction(ACT_TEXT); addAction(ACT_BRIDGE)
+                addAction(ACT_TEXT); addAction(ACT_BRIDGE); addAction(ACT_CONFIG); addAction(ACT_RUN)
             },
             Context.RECEIVER_EXPORTED,
         )
+        screenOn = Watch.attach(this)
         dumpAllDisplays()
     }
+
+    private var screenOn: android.content.BroadcastReceiver? = null
 
     override fun onDestroy() {
         instance = null
         runCatching { unregisterReceiver(receiver) }
+        runCatching { screenOn?.let { unregisterReceiver(it) } }
         super.onDestroy()
     }
 
@@ -164,5 +181,7 @@ class EyesAndHands : AccessibilityService() {
         const val ACT_CLICK = "ai.whalephone.agent.CLICK"
         const val ACT_TEXT  = "ai.whalephone.agent.TEXT"
         const val ACT_BRIDGE = "ai.whalephone.agent.BRIDGE"
+        const val ACT_CONFIG = "ai.whalephone.agent.CONFIG"
+        const val ACT_RUN = "ai.whalephone.agent.RUN"
     }
 }

@@ -106,10 +106,17 @@ Shizuku 的代价最小:它用 Android 11 引入的无线调试功能,在手机�
 
 **`ALWAYS_UNLOCKED`(Android 14+)** —— 副屏不受 keyguard 管辖。实测在**锁屏状态下**
 完成了:启动淘宝 → 点搜索框 → 输入「AirPods Pro 2」→ 提交 → 读出带价格的结果列表,
-全程主屏保持 `mDreamingLockscreen=true`,没有被唤醒。
+全程主屏保持 `mDreamingLockscreen=true`,没有被唤醒。没有这一位,无障碍在锁屏时
+只能看见 keyguard。
 
-这一位把问题的性质变了。原来的目标是「用户用手机时不打扰他」,而实际上手机大部分
-时间是锁着的 —— 那才是 agent 真正的工作时间。
+**但它只解决锁屏,不解决息屏。** 副屏和主屏共用同一个电源组(这台机器 `dumpsys power`
+只有 `groupId: 0`),主屏一灭副屏跟着灭,上面的 Activity 被停掉。`OWN_DISPLAY_GROUP`
+分的是窗口组不是电源组,`DEVICE_DISPLAY_GROUP` 也没分出来;从副屏的 display context
+取 `SCREEN_BRIGHT_WAKE_LOCK` 会把主屏一起点亮,更不能用。
+
+所以 agent 的可工作时间等于用户的亮屏时间。这不算坏消息:题目要解决的本来就是
+「用户正在用手机的时候」,那时候屏幕必然亮着;而手机闲置时 agent 一点电都不耗。
+长时任务据此改成亮屏触发而不是定时轮询。
 
 对不支持这些位的老设备,`Privileged.createAgentDisplayBestEffort()` 按重要性逐位降级,
 并报出最终生效的组合,而不是整个失败。

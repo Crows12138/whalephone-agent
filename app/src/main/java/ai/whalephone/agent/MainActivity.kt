@@ -79,10 +79,10 @@ class MainActivity : Activity() {
         }
         root.addView(goal)
 
-        root.addView(label("长时任务(留空 = 只跑一次)"))
+        root.addView(label("长时任务(留空 = 只跑一次;每次亮屏检查一轮)"))
         val rounds = EditText(this).apply { hint = "盯几轮"; setSingleLine()
             inputType = InputType.TYPE_CLASS_NUMBER }
-        val every = EditText(this).apply { hint = "每隔几分钟(最少 ${Watch.MIN_INTERVAL_MIN})"
+        val every = EditText(this).apply { hint = "两轮至少隔几分钟(最少 ${Watch.MIN_GAP_MIN})"
             setSingleLine(); inputType = InputType.TYPE_CLASS_NUMBER }
         root.addView(rounds); root.addView(every)
 
@@ -95,9 +95,9 @@ class MainActivity : Activity() {
                 if (g.isBlank()) { toast("先写任务"); return@setOnClickListener }
                 val n = rounds.text.toString().toIntOrNull() ?: 0
                 if (n > 1) {
-                    val iv = (every.text.toString().toIntOrNull() ?: Watch.MIN_INTERVAL_MIN)
+                    val iv = (every.text.toString().toIntOrNull() ?: Watch.MIN_GAP_MIN)
                     Watch.start(this@MainActivity, g, n, iv)
-                    toast("开始盯:$n 轮,每 ${maxOf(iv, Watch.MIN_INTERVAL_MIN)} 分钟一次")
+                    toast("开始盯:$n 轮,亮屏时检查,间隔  ${maxOf(iv, Watch.MIN_GAP_MIN)} 分钟起")
                 } else {
                     Watch.clear(this@MainActivity)
                     toast("已启动,进度看通知")

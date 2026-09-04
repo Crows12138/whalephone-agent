@@ -48,17 +48,29 @@ class AgentService : Service() {
     private fun runTask(goal: String) {
         val probe = EyesAndHands.instance
         if (probe == null) { finish("无障碍服务没开,agent 没有眼睛"); return }
-        if (!Privileged.connect(this)) { finish("特权桥没连上,检查 Shizuku 是否在运行并已授权"); return }
         val llm = Config.llm(this) ?: run { finish("没配 LLM_API_KEY"); return }
 
-        val m = resources.displayMetrics
-        val d = AgentDisplay.create(m.widthPixels, m.heightPixels, m.densityDpi)
-            ?: run { finish("副屏创建失败"); return }
-        display = d
-        Log.i(TAG, "副屏 ${d.displayId} 就绪: ${d.guarantees()}")
-        note("副屏 ${d.displayId} 就绪 · ${d.guarantees()}")
+        // 开发期口子:接管一块已经由 ADB 造好的副屏,跳过 Shizuku 授权那一步。
+        // 生产路径(下面的 else)一步不少,这里只是让「感知-决策-操作」这条链
+        // 能在没拿到授权时先单独验证 —— 两个未知搅在一起排查不了。
+        val devId = Config.get(this, KEY_DEV_DISPLAY).toIntOrNull()
+        val displayId: Int
+        if (devId != null) {
+            displayId = devId
+            Log.w(TAG, "开发模式:接管已有副屏 $devId,不经过特权桥")
+            note("开发模式 · 副屏 $devId")
+        } else {
+            if (!Privileged.connect(this)) { finish("特权桥没连上,检查 Shizuku 是否在运行并已授权"); return }
+            val m = resources.displayMetrics
+            val d = AgentDisplay.create(m.widthPixels, m.heightPixels, m.densityDpi)
+                ?: run { finish("副屏创建失败"); return }
+            display = d
+            displayId = d.displayId
+            Log.i(TAG, "副屏 ${d.displayId} 就绪: ${d.guarantees()}")
+            note("副屏 ${d.displayId} 就绪 · ${d.guarantees()}")
+        }
 
-        val hands = Hands(probe, d.displayId, this)
+        val hands = Hands(probe, displayId, this)
         val agent = Agent(hands, llm, goal)
         agent.onStep = { s -> if (!stopping) update("第 ${s.n} 步 · ${s.action}", s.result.take(80)) }
         agent.onAsk = { q -> ask(q) }
@@ -73,13 +85,13 @@ class AgentService : Service() {
         if (Watch.plan(this) != null) {
             val changed = Watch.record(this, out.message)
             display?.release(); display = null
-            val next = Watch.scheduleNext(this)
-            if (next == null) {
+            if (Watch.roundsLeft(this) <= 0) {
+                Watch.clear(this)
                 finish("盯完了。最后一次的结果:${out.message}")
             } else {
                 if (changed) alert("有变化", out.message)
-                update("盯着呢 · 下次 $next", out.message)
-                Log.i(TAG, "本轮结束,${if (changed) "有变化" else "没变化"},下次 $next")
+                update("盯着呢 · ${Watch.statusLine(this)}", out.message)
+                Log.i(TAG, "本轮结束,${if (changed) "有变化" else "没变化"}")
             }
             return
         }
@@ -183,6 +195,7 @@ class AgentService : Service() {
         private const val NOTI_ASK = 2
         const val ACT_STOP = "ai.whalephone.agent.STOP"
         const val EXTRA_GOAL = "goal"
+        const val KEY_DEV_DISPLAY = "DEV_DISPLAY_ID"
 
         fun start(ctx: Context, goal: String) {
             ctx.startForegroundService(Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))

@@ -9,6 +9,7 @@ import android.view.Surface;
 import java.lang.reflect.Method;
 import java.lang.reflect.Constructor;
 import android.content.ContextWrapper;
+import android.os.PowerManager;
 import android.graphics.Bitmap;
 import android.media.Image;
 import java.io.FileOutputStream;
@@ -111,6 +112,20 @@ public class FlagProbe {
             ImageReader r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
             VirtualDisplay vd = dm.createVirtualDisplay("whalephone-agent", w, h, dpi, r.getSurface(), accepted);
             System.out.println("HOLD displayId=" + vd.getDisplay().getDisplayId() + " 保持 " + hold + " 秒");
+
+            // 唤醒锁在 AOSP 里是按显示器组归属的:从某块屏的 display context 上取的锁
+            // 只让那个组保持清醒。如果这一条成立,副屏就能在用户息屏后继续工作 ——
+            // 而手机大部分时间是息屏的,这决定了 agent 到底有多少可用工时。
+            try {
+                Context dctx = c.createDisplayContext(vd.getDisplay());
+                PowerManager pm = (PowerManager) dctx.getSystemService(Context.POWER_SERVICE);
+                PowerManager.WakeLock wl = pm.newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "whalephone:vd");
+                wl.acquire();
+                System.out.println("唤醒锁已取,held=" + wl.isHeld());
+            } catch (Throwable t) {
+                System.out.println("唤醒锁失败: " + t);
+            }
             System.out.flush();
             // 持屏期间不断把最新一帧写成 PNG。这样「看副屏」就是读一个文件,
             // 不用 scrcpy 录屏再抽帧 —— 那条路只是为了在电脑上肉眼看,
