@@ -20,23 +20,49 @@ GOAL="${1:-打开淘宝,搜索「保温杯」,告诉我前两个商品的价格�
 ime()   { sh dumpsys input_method | grep -oE "mInputShown=[a-z]+" | head -1 | cut -d= -f2; }
 focus() { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-9]+$" | head -1; }
 
-echo "== 准备:在主屏上把真实输入法叫出来 =="
+# 分两段,顺序不能反。
+#
+# 为什么:造副屏这一步现在是**事前避让** —— 机主在打字就干脆不造(造屏必然抢一次
+# 焦点、收一次键盘)。如果一上来就把键盘顶着再发任务,agent 会一直等、等满 3 分钟
+# 放弃,任务根本不会启动,读数是空的却看不出来。真机上就这么白跑了一轮。
+#
+# 而这个脚本要测的是另一条路径:**逐步让路** —— 副屏已经在、任务已经在跑,
+# 机主中途开始打字,agent 每个动作前检查一次并停手。这才是「机主用着手机的同时
+# agent 在干活」那个核心场景。所以:
+#
+#   第一段:机主没打字,先跑一轮把副屏造出来(副屏按设计跨任务保留)
+#   第二段:再发一个任务,等它真的动起来,这时才叫键盘并顶住,只在这段窗口计掉落
+echo "== 第一段:机主没打字,先把副屏造出来 =="
+sh input -d 0 keyevent 4 >/dev/null 2>&1
+python -c "import time;time.sleep(1)"
+[ "$(ime)" = "true" ] && { echo "键盘还开着,收不掉,测不了"; exit 1; }
+sh logcat -c
+bc -a $A.RUN --es goal "'打开计算器'" >/dev/null 2>&1
+for _ in $(seq 1 60); do python -c "import time;time.sleep(2)"; sh logcat -d -s WPSvc:* | grep -q "收工:" && break; done
+D=$(sh logcat -d -s WPSvc:* | grep -oE "副屏 [0-9]+ 就绪" | grep -oE "[0-9]+" | tail -1)
+[ -z "$D" ] && { echo "副屏没造出来,后面测不了"; sh logcat -d -s WPSvc:* | tail -3; exit 1; }
+echo "   副屏 $D 已就绪,会留到下一个任务复用"
+
+echo
+echo "== 第二段:任务跑起来之后,机主才开始打字 =="
+sh logcat -c
+bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+# 等 agent 真的迈出第一步再叫键盘 —— 早了就又变成事前避让,晚了窗口就短
+for _ in $(seq 1 45); do
+  python -c "import time;time.sleep(2)"
+  sh logcat -d -s WPAgent:* | grep -q "第 1 步" && break
+done
+sh logcat -d -s WPAgent:* | grep -q "第 1 步" || { echo "agent 没动起来,测不了"; exit 1; }
+echo "   agent 已经在干活了,现在把机主的输入法叫出来"
 # 用 Edge 的地址栏,不用本 app 自己的输入框。
 # 焦点被挪到副屏期间,机主前台的 app 一旦收到触摸就会
 # 「Input dispatching timed out」ANR,而 ANR 对话框本身也会带走键盘 ——
-# 拿本 app 当载体,等于用一个会被待测现象弄坏的东西去测那个现象,
-# 量出来的「被收起 6 次」里有几次是自己的 ANR 造成的都分不清。
-#
-# 也不能用 app 的 SNAP/CLICK 广播来点输入框:A11yGate 上线后无障碍默认是关的,
-# 那两个广播的接收器根本不存在,准备阶段会直接失败。raise_ime 走 uiautomator,
-# 不吃这个依赖。
+# 拿本 app 当载体,等于用一个会被待测现象弄坏的东西去测那个现象。
 raise_ime || { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
 echo "   输入法已弹出 mInputShown=true  焦点屏=$(focus)"
 
 echo
-echo "== 开跑,全程采样 =="
-sh logcat -c
-bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+echo "== 开始采样(任务已经在跑,键盘已经弹着)=="
 
 # 机主不会一直开着键盘不动。让键盘全程弹着,测的就变成「等到超时之后会怎样」,
 # 那不是真实场景 —— 真人打字是几秒到几十秒然后停。
@@ -48,7 +74,10 @@ for i in $(seq 1 600); do
   NOW=$(( $(date +%s) - T0 ))
   if [ "$CLOSED" = "0" ] && [ "$NOW" -ge "$TYPING_S" ]; then
     echo "   [${NOW}s] 机主打完字,自己收起键盘(之后的掉落不算 agent 头上)"
-    sh input -d 0 keyevent 111 >/dev/null 2>&1
+    # 用返回键收键盘,不用 ESC:讯飞对 keyevent 111 没反应(真机实测),
+    # 结果就是键盘一直顶着,agent 一直在等,任务从头到尾没启动而读数看着正常。
+    # 软键盘弹着时返回键先被 IME 吃掉,不会真的往回导航。
+    sh input -d 0 keyevent 4 >/dev/null 2>&1
     CLOSED=1; python -c "import time;time.sleep(1)"; PREV=$(ime); continue
   fi
   M=$(ime); F=$(focus)
