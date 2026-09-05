@@ -23,6 +23,7 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
 
     private lateinit var status: TextView
+    private lateinit var scroller: ScrollView
     private lateinit var goal: EditText
 
     override fun onCreate(b: Bundle?) {
@@ -32,6 +33,9 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            // 不这么写的话,输入框会在创建时自动拿走焦点,ScrollView 跟着滚下去,
+            // 顶上的状态面板被顶出可视区 —— 而那正是第一眼要看的东西。
+            isFocusableInTouchMode = true
         }
 
         fun label(t: String) = TextView(this).apply {
@@ -48,9 +52,6 @@ class MainActivity : Activity() {
                     if (!has) Config.set(this@MainActivity, key, text.toString().trim())
                 }
             }
-
-        status = TextView(this).apply { textSize = 13f; setTextIsSelectable(true) }
-        root.addView(status)
 
         root.addView(Button(this).apply {
             text = "刷新状态"
@@ -112,11 +113,57 @@ class MainActivity : Activity() {
             }
         })
 
-        setContentView(ScrollView(this).apply { addView(root, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) })
+        // 状态面板钉在滚动区外面。它是这个界面最该被第一眼看到的东西
+        // (四项里少任何一项 agent 都跑不起来),放进 ScrollView 里就会被
+        // 下面的输入框挤走 —— 试过让它滚回顶部,不如从结构上不让它滚。
+        status = TextView(this).apply {
+            textSize = 14f
+            setTextIsSelectable(true)
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(pad, pad, pad, pad / 2)
+        }
+
+        scroller = ScrollView(this).apply {
+            addView(root, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(status, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
+        }
+        setContentView(container)
+        applyInsets(container)
+        root.requestFocus()
         refresh()
     }
 
-    override fun onResume() { super.onResume(); refresh() }
+    /**
+     * targetSdk 35 起系统强制 edge-to-edge,内容直接画到状态栏和标题栏底下,
+     * 不再自动留白。表现是界面顶部几行被盖住 —— 这里正好盖住的是状态面板,
+     * 而那是唯一告诉用户「还差哪一步」的地方。
+     *
+     * 用平台自带的 insets API 自己补,不为这一处引 androidx。
+     */
+    private fun applyInsets(v: android.view.View) {
+        val bar = android.util.TypedValue().let { tv ->
+            if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true))
+                android.util.TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics)
+            else 0
+        }
+        v.setOnApplyWindowInsetsListener { view, insets ->
+            val sys = insets.getInsets(
+                android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime()
+            )
+            view.setPadding(sys.left, sys.top + bar, sys.right, sys.bottom)
+            insets
+        }
+        v.requestApplyInsets()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refresh()
+    }
 
     private fun refresh() {
         val a11y = EyesAndHands.instance != null
