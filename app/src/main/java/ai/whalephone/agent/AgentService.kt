@@ -81,9 +81,17 @@ class AgentService : Service() {
             // 所以它和后面每个动作一样,要先等机主打完字。
             // (漏掉这一处的后果是整套让路白做:动作全让了,开场第一秒还是把人打断。)
             val d = shared ?: run {
-                EyesAndHands.instance?.let { svc ->
-                    val w = Conflict.yieldWhileOwnerTypes(svc)
-                    if (w > 0) note("机主在打字,等了 ${w / 1000} 秒再造副屏")
+                // 等到机主打完字再造。等不到就不造 —— 这是唯一一处「等超时之后还硬做」
+                // 会真的打断机主的地方(造屏必然抢一次焦点,收一次键盘),
+                // 而「不打扰」是硬要求,任务能不能做完不是。所以宁可这一轮不开工。
+                val svc = EyesAndHands.instance
+                if (svc != null) {
+                    val w = Conflict.yieldWhileOwnerTypes(svc, DISPLAY_WAIT_MS)
+                    if (w > 0) note("机主在打字,等了 ${w / 1000} 秒")
+                    if (Conflict.ownerTyping(svc)) {
+                        finish("机主一直在打字,这一轮先不开工 —— 现在造副屏会收起他的键盘。等他空下来再叫我")
+                        return
+                    }
                 }
                 AgentDisplay.create(
                     resources.displayMetrics.widthPixels,
@@ -263,6 +271,10 @@ class AgentService : Service() {
         private const val CH_ASK = "agent_ask"
         private const val NOTI_ID = 1
         private const val NOTI_ASK = 2
+
+        /** 造副屏之前最多等机主多久。比单步等待长得多:造屏一个任务只发生一次,
+         *  多等一会儿换「一次都不打断」是划算的。 */
+        const val DISPLAY_WAIT_MS = 180_000L
         const val ACT_STOP = "ai.whalephone.agent.STOP"
         const val EXTRA_GOAL = "goal"
         const val KEY_DEV_DISPLAY = "DEV_DISPLAY_ID"

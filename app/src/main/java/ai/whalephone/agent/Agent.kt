@@ -46,7 +46,14 @@ class Agent(
         var lastRender = ""
         var sameCount = 0
 
-        for (n in 1..maxSteps) {
+        // n 只数「真正动过手」的步。让路的那些轮不占预算 —— 否则机主多打几次字,
+        // 步数预算就被等待吃光,任务明明还没开始做就报「走满 N 步」。
+        // rounds 是防死循环的兜底:万一让路条件一直成立,总轮数还是有上界。
+        var n = 0
+        var rounds = 0
+        while (n < maxSteps && rounds < maxSteps * 4) {
+            rounds++
+            n++
             val snap = hands.snapshot()
             val render = snap.render()
 
@@ -54,7 +61,11 @@ class Agent(
             // 界面到底动没动,只有这里比得出来 —— 而模型看不到这里。它的历史里
             // 每一步都是「点了 [68]」这种成功记录,于是它会一直点下去,直到被判卡死,
             // 全程不知道自己在原地踏步。把这个事实写回上一步的结果,让它下一轮就看见。
-            val idled = render == lastRender && trace.lastOrNull()?.action.let { it != null && it != "note" }
+            // 让过路的那一步本来就没动手,界面当然没变 —— 它不能算进「原地踏步」。
+            // 不排掉的话,机主多打几次字,任务就会被误判成卡死。
+            val idled = render == lastRender && !lastStepYielded &&
+                trace.lastOrNull()?.action.let { it != null && it != "note" }
+            lastStepYielded = false   // 判完就清:它描述的是**上一步**
             if (idled) {
                 sameCount++
                 trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "  ← 界面没有任何变化") }
@@ -106,20 +117,36 @@ class Agent(
                     runCatching { execute(name, act) }
                         .getOrElse { "这个动作的参数不对(${it.message});照着动作表把参数补齐再来一次" })
             }
+            if (lastStepYielded) n--   // 这一轮只是等机主打完字,没动手,不算一步
         }
         return Outcome(false, "走满 $maxSteps 步还没完成", trace)
     }
+
+    /** 上一步是不是「让了路、没动手」。卡死检测要跳过这种步。 */
+    private var lastStepYielded = false
 
     private fun execute(name: String, a: JSONObject): String {
         // 机主在打字就先让路。放在这里而不是各个动作里,是因为「会不会引发副屏窗口切换」
         // 不是按动作分的:点一下可能跳页,写文本可能弹搜索建议,启动一定会。
         // 与其逐个判断,不如所有动作都走同一道门。
         val waited = hands.yieldToOwner()
+        // 等过之后就不能再照着旧决策动手了。
+        //
+        // 模型这一步的序号和位置,都是在**等待之前**那一帧快照上算出来的。等待期间
+        // 机主在操作他自己那块屏,副屏上的 App 也可能自己往前走(动画、加载、弹窗)。
+        // 拿旧序号去点,轻则点空,重则点到别的东西上 —— 实测两轮任务就是这么跑飞的:
+        // 让了两秒,接着点击落空,再往下模型就读不懂自己在哪了。
+        //
+        // 所以让过路就把这一步退回去,让循环重新拍一帧、模型重新决定。代价是多一次
+        // 模型调用,换的是「决策和世界是同一时刻的」这条不变量。
+        if (waited >= 1000) {
+            lastStepYielded = true
+            return "机主刚才在打字,agent 让了 ${waited / 1000} 秒没动手。" +
+                "这段时间界面可能已经变了,上面这一帧是最新的,重新看一眼再决定"
+        }
         val r = doExecute(name, a)
         Thread.sleep(600)   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
-        // 让路要让模型和机主都看得见:模型据此知道这一步为什么慢,
-        // 通知里也能显示 agent 主动避让过 —— 这正是「不打扰」这件事的证据。
-        return if (waited >= 1000) "$r(机主当时在打字,先让了 ${waited / 1000} 秒)" else r
+        return r
     }
 
     private fun doExecute(name: String, a: JSONObject): String = when (name) {

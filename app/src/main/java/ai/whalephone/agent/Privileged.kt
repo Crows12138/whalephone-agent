@@ -114,9 +114,15 @@ object Privileged {
     /** 无障碍能不能读到这块屏。造屏之后必须问一次 —— 读不到的话 agent 没有眼睛。 */
     private fun a11ySees(displayId: Int): Boolean {
         val svc = EyesAndHands.instance ?: return true   // 服务还没连上,这里判断不了,不拦
-        // 屏刚造出来,窗口管理器和无障碍那边都要几百毫秒才跟上
-        repeat(6) {
-            if (svc.windowsOnAllDisplays.indexOfKey(displayId) >= 0) return true
+        // 屏刚造出来,窗口管理器和无障碍那边都要一会儿才跟上。
+        // 等得宽一点是有代价考虑的:等太短会把「还没注册上」误判成「看不见」,
+        // 于是白白补 PUBLIC 重造一块 —— 在本来就看得见私有屏的 ROM(三星)上,
+        // 那是平白把屏改成公开的,可能牵动 DeX 之类的行为。宁可多等两秒。
+        repeat(12) {
+            if (svc.windowsOnAllDisplays.indexOfKey(displayId) >= 0) {
+                Log.i(TAG, "无障碍看得见副屏 $displayId,保持私有屏")
+                return true
+            }
             Thread.sleep(250)
         }
         return false
