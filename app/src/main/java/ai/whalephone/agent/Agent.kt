@@ -54,6 +54,11 @@ class Agent(
         while (n < maxSteps && rounds < maxSteps * 4) {
             rounds++
             n++
+            // 接下来是拍快照 + 等模型返回,agent 这几秒什么都不做。
+            // 焦点这段时间没有理由押在副屏上 —— 押着的代价是机主一碰自己的屏幕就可能
+            // 「Application does not have a focused window」。实测这类空闲占了任务
+            // 全程的大部分,所以还回去能把风险窗口从「整个任务」压到「只有动作那几下」。
+            hands.returnFocusToOwner()
             val snap = hands.snapshot()
             val render = snap.render()
 

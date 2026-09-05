@@ -50,6 +50,17 @@ class Hands(
     fun yieldToOwner(): Long = Conflict.yieldWhileOwnerTypes(svc)
 
     /**
+     * 把焦点还给机主那块屏 —— 只在 agent 接下来必定空闲时调用。
+     * 关掉:`FOCUS_RETURN=0`。留这个口子是因为这条改动带风险(见 Privileged 里的说明),
+     * 万一在某台机器上又量到 ANR,不用改代码就能退回去。
+     */
+    fun returnFocusToOwner() {
+        if (Config.get(ctxRef, "FOCUS_RETURN", "1") == "0") return
+        runCatching { Privileged.handBackFocusIfLost() }
+            .onSuccess { if (it.startsWith("主屏原本")) Log.i(TAG, it) }
+    }
+
+    /**
      * 一个动作有没有真的生效,唯一可靠的判据是**界面动没动** —— 返回值一律不信。
      *
      * 无障碍动作和注入的按键都可能「成功地什么也没做」:节点收下 ACTION_CLICK 但
