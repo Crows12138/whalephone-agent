@@ -16,7 +16,9 @@
 .scratch/
 .sdkimg.log
 .sdkinstall.log
+.sdklist.txt
 .see.log
+.shizuku.log
 .snap.mkv
 .vd*.mkv
 .vd*.png
