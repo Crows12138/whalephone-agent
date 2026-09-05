@@ -15,7 +15,7 @@
 | 主屏内容不被篡改 | ✅ | 全程知乎保持在 Display 0 |
 | **读取非焦点屏的 UI** | ❌ | `uiautomator dump --display` 参数被忽略 |
 | **不抢全局焦点** | ❌ | 每次操作 FocusedDisplayId 都跳过去 |
-| `screencap -d` 截虚拟屏 | ❌ | 只认 SurfaceFlinger 物理 ID,返回 80 字节空图 |
+| `screencap -d` 截虚拟屏 | ✅ | 要传 SurfaceFlinger 的显示器 ID,不是逻辑 displayId(这一条最初测错了,见文末) |
 | 每屏独立焦点开关 | ❌ | `settings list global` 无此键,ROM 编译期常量 |
 | 多用户 | ❌ | `Maximum supported switchable users: 1` |
 
@@ -89,8 +89,9 @@ IME → InputConnection。终点相同(mImeInputTarget 稳定指向主屏字段)
 |---|---|---|
 | 看主屏 | `adb exec-out screencap -p` | ✅ 直接出图 |
 | 看虚拟屏 | scrcpy 录 2 秒 + ffmpeg 抽末帧 | ✅ 约 4 秒一张 |
-| 看虚拟屏 | `screencap -d <逻辑id>` | ❌ 80 字节空图 |
+| 看虚拟屏 | `screencap -d <逻辑id>` | ❌ 报 `Display Id 'N' is not valid` |
 | 看虚拟屏 | `screencap -a` (所有活动显示器) | ❌ 只出主屏一张 |
+| 看虚拟屏 | `screencap -d <SurfaceFlinger 显示器id>` | ✅ 正常出图 |
 | 读焦点屏 UI 树 | `uiautomator dump` | ✅ |
 | 读非焦点屏 UI 树 | `uiautomator dump --display` | ❌ 参数被忽略 |
 
@@ -468,3 +469,40 @@ Privileged.exec("am start ... \$(cmd package resolve-activity --brief $pkg | tai
 改完跑同一个任务:9 步完成,launch / set_text / click+触摸降级 全部照常。
 
 教训:**「模型只能输出结构化动作」不等于安全**,得看那些动作的参数最后流到哪儿。
+
+
+## 推翻一条自己的结论:screencap 其实能截虚拟屏
+
+之前记的是「`screencap -d` 只认 SurfaceFlinger 物理 ID,对虚拟屏返回 80 字节空图」,
+这条错了,而且被我写进了三处源码注释和三份文档。
+
+真相:`screencap -d` 要的确实是 SurfaceFlinger 的显示器 ID(传逻辑 displayId 会报
+`Display Id 'N' is not valid`,连主屏的 0 也一样报),**而虚拟显示器在 SurfaceFlinger
+里是有 ID 的**:
+
+```
+$ dumpsys SurfaceFlinger --display-id
+Display 4633128672291736003 (HWC display 0): displayName="samsung lcd"
+Display 11529215048113231701 (Virtual display): displayName="whalephone-agent"
+
+$ screencap -d 11529215048113231701 -p /sdcard/sc.png   # 150483 字节,内容是副屏
+```
+
+错在哪:当初那个实验脚本里写的是
+
+```bash
+PHYS=$(dumpsys SurfaceFlinger --display-id | grep -oE "Display [0-9]+" | ... | head -1)
+```
+
+`head -1` 取的是**物理 LCD**那一条,所以「方案2:screencap -d 物理ID」从头到尾
+测的都是主屏,压根没试过虚拟屏那个 ID。结果被我记成了「虚拟屏抓不到」。
+
+**这个错误的类型和之前几次一样**:实验设计里有个隐含假设(「物理 ID」只有一个),
+假设不成立,但失败现象看起来完全符合预期,于是就当结论收下了。
+`head -1` 这种取值方式在探索阶段特别危险 —— 它会安静地替你做一个你没意识到的选择。
+
+**对设计的影响**:选无障碍树而不是截图,原来列的第一条理由(截图路径窄)不成立,
+已删。剩下两条(token 成本差一个数量级、按序号落点不用猜坐标)仍然成立,
+而且 AndroidWorld 的 T3A/M3A 对比是外部旁证。`AgentDisplay` 继续用 ImageReader,
+但理由改成了实事求是的那个:自己持有 Surface,不走 shell、不用每次造屏都去解析一次
+SurfaceFlinger 的 ID,取景窗要连续出帧这条更直接 —— 而不是「别无选择」。

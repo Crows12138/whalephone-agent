@@ -8,7 +8,7 @@ import android.view.accessibility.AccessibilityWindowInfo
  * 把一块显示器的无障碍树压成一份模型读得懂的文本。
  *
  * 为什么是树不是截图:
- *   1. 虚拟屏的截图路径本来就窄(screencap 只认物理显示器,实测返回 80 字节空图),
+ *   1. 无障碍树是唯一原生带显示器维度的读取通道(uiautomator 只读全局焦点屏),
  *      而无障碍树是唯一原生带显示器维度的读取通道;
  *   2. 结构化文本比图便宜一个数量级,长时任务要跑几十上百步,这个差距是决定性的;
  *   3. 树里带 clickable / editable / bounds,动作能按序号精确落点,不用模型猜坐标。

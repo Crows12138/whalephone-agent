@@ -48,7 +48,7 @@
     bash scripts/see.sh          # 主屏 -> shots/main_HHMMSS.png
     bash scripts/vd2.sh png      # 副屏 -> .vd.png
 
-主屏走 `adb exec-out screencap`。副屏 **screencap 抓不到**(它只认
+主屏走 `adb exec-out screencap`。副屏也能 screencap,但要传 SurfaceFlinger 的显示器 ID(不是
 SurfaceFlinger 的物理显示器 ID,实测返回 80 字节空图),走持屏进程里的
 ImageReader 抓帧写 PNG,毫秒级。
 

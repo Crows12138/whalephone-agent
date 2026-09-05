@@ -13,8 +13,11 @@ import java.io.FileOutputStream
  * 虚拟显示器必须有一个 Surface 承接画面。之前的探针阶段是拿 scrcpy 录屏当水槽,
  * 再用 ffmpeg 抽帧 —— 那是为了在电脑上肉眼看,不是 agent 需要的。这里换成
  * ImageReader:画面直接落在 app 自己的内存里,截图变成一次 acquireLatestImage,
- * 不依赖 scrcpy、不写视频文件、也绕开了 `screencap -d` 抓不到虚拟屏的限制
- * (screencap 只认 SurfaceFlinger 的物理显示器 ID,实测对虚拟屏返回 80 字节空图)。
+ * 不依赖 scrcpy,也不写视频文件。
+ *
+ * `screencap -d` 也能截虚拟屏,但要传 SurfaceFlinger 的显示器 ID —— 那个 ID 每次
+ * 造屏都变,得先 dumpsys 解析一次。ImageReader 是自己持有 Surface,不走 shell、
+ * 不解析任何东西,取景窗要连续出帧,这条更直接。
  *
  * 注意:agent 主要靠无障碍树感知,截图是给 WebView / Canvas / 游戏这类
  * 树里读不出东西的场景兜底,以及给演示视频提供「agent 那块屏在干什么」的画面。

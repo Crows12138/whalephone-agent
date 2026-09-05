@@ -23,7 +23,9 @@ echo; echo "═══ 方案1: screencap -d 逻辑ID ═══"
 sh screencap -d "$VD" -p /sdcard/c1.png; echo "  size=$(sh 'stat -c %s /sdcard/c1.png 2>/dev/null||echo 0')"
 
 echo; echo "═══ 方案2: screencap -d 物理ID ═══"
-PHYS=$(sh dumpsys SurfaceFlinger --display-id | grep -oE "Display [0-9]+" | grep -oE "[0-9]+" | head -1)
+# 注意:这里要取**虚拟显示器**那一条,不是物理 LCD。最初写成 head -1,
+# 于是整个「方案2」测的都是主屏,却被记成「虚拟屏抓不到」(见 FINDINGS)。
+PHYS=$(sh dumpsys SurfaceFlinger --display-id | grep -i "Virtual display" | grep -oE "Display [0-9]+" | grep -oE "[0-9]+" | head -1)
 echo "  物理ID尝试: $PHYS"
 sh screencap -d "$PHYS" -p /sdcard/c2.png; echo "  size=$(sh 'stat -c %s /sdcard/c2.png 2>/dev/null||echo 0')"
 
