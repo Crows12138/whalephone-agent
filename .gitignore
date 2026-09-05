@@ -1,33 +1,30 @@
 # 工具链:JDK / Android SDK / scrcpy,几百 MB,不进仓库
+tools/
+wptoolsandroid-sdk/
+
 # 构建产物
-# 设备现场备份,和具体手机绑定
-# 运行期临时文件
-.avd.log
-.backup/
-.build.log
-.build.log
-.cap.mp4
-.did
-.f.log
 .gradle/
-.hold.log
-.mkavd.bat
-.runavd.bat
-.scratch/
-.sdkimg.log
-.sdkinstall.log
-.sdklist.txt
-.see.log
-.shizuku.log
-.snap.mkv
-.vd*.mkv
-.vd*.png
-.vd*_state
+.kotlin/
 app/build/
 build/
 local.properties
 probe/classes.dex
 probe/out*/
+
+# 设备现场备份,和具体手机绑定
+.backup/
+.did
 shots/
-tools/
-wptoolsandroid-sdk/
+
+# 运行期临时文件:各种日志、抓屏、脚本生成的中间件
+.*.log
+.avd.log
+.cap.mp4
+.mkavd.bat
+.runavd.bat
+.scratch/
+.sdklist.txt
+.snap.mkv
+.vd*.mkv
+.vd*.png
+.vd_state*
