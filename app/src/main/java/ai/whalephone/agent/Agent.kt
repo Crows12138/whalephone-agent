@@ -111,6 +111,10 @@ class Agent(
         "long_click" -> hands.longClick(a.getInt("index"))
         "set_text"   -> hands.setText(a.getInt("index"), a.optString("text"))
         "scroll"     -> hands.scroll(a.getInt("index"), a.optString("direction", "forward") == "forward")
+        "swipe"      -> hands.swipe(if (a.has("index")) a.getInt("index") else null,
+                                    a.optString("direction", "up"))
+        "double_tap" -> hands.doubleTap(a.getInt("index"))
+        "enter"      -> hands.enter()
         "launch"     -> hands.launch(a.getString("package"))
         "back"       -> hands.back()
         "home"       -> hands.home()
@@ -182,6 +186,11 @@ class Agent(
               long_click  index
               set_text    index, text(自带聚焦并覆盖原内容,不用先点它、也不用先清空)
               scroll      index, direction("forward" 往下 / "backward" 往上)
+                          —— 语义滚动,只对本身可滚动的列表有效
+              swipe       direction("up"/"down"/"left"/"right"),index 可省(省了就划整块屏)
+                          —— 真实划动。轮播图、侧边抽屉、左滑删除这些 scroll 滚不动的,用它
+              double_tap  index
+              enter       (无参数,回车/搜索键)
               launch      package(应用包名)
               back        (无参数,只在副屏上返回)
               home        (无参数,回副屏自己的桌面;界面乱了就用它重来)
@@ -197,6 +206,7 @@ class Agent(
             - 历史里标了「界面没有任何变化」的那步,是白做的 —— 元素收下了动作但什么也没发生。
               再点一次结果一样。要么换个元素,要么换条路,要么承认这条路走不通。
             - 想往输入框里写字就直接 set_text。反复点同一个元素等它「变成输入状态」是没用的。
+            - 搜索框填完直接 enter 提交,比去树里找「搜索」按钮可靠 —— 那个按钮不一定在树里。
             - 副屏上可能还停着上一个任务留下的界面。不确定自己在哪就先 home,再 launch。
             - 一屏放不下的信息,看到一条就先 note 一条再往下翻。你每一轮只看得见当前这一帧,
               滚走了就没了 —— 靠回头再找会原地打转。

@@ -85,7 +85,7 @@ DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_
 
 | 文件 | 内容 |
 |---|---|
-| [TECH-CHOICES.md](TECH-CHOICES.md) | 技术选型:候选路线的淘汰过程、七类资源竞争、每个决定的依据 |
+| [TECH-CHOICES.md](TECH-CHOICES.md) | 技术选型:候选路线淘汰过程、八类资源竞争、动作空间与 AndroidWorld/AutoGLM 的对照 |
 | [FINDINGS.md](FINDINGS.md) | 真机实测记录,包括踩过的坑和**被推翻的结论** |
 | [TASK-DESIGN.md](TASK-DESIGN.md) | 演示任务的选型理由和拍摄脚本 |
 | [HARNESS.md](HARNESS.md) | 开发夹具:怎么独立跑测试,不靠肉眼看屏幕 |

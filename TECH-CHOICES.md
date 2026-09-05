@@ -182,7 +182,49 @@ TextView。三行说同一件事,模型看到三个一样的序号只会犯错�
 前三条是「不打扰」的直接实现,后四条是隐蔽的那一半 —— 它们不抢焦点、不抢画面,
 屏幕上毫无痕迹,但用户复制的文字会消失、正在用的 App 会跳走。这一半更值得写下来。
 
-## 八、模型的输出到底有多大权力
+## 八、动作空间:和这个领域的标准对照
+
+一开始这份动作表是我按无障碍 API 能做什么直接写的,没对照过既有工作。后来补了功课,
+拿 [AndroidWorld](https://github.com/google-research/android_world)(Google,这个领域
+事实上的基准)和 [AutoGLM-Phone](https://docs.bigmodel.cn/cn/guide/models/vlm/autoglm-phone)
+(智谱)的动作空间比了一遍:
+
+| 本项目 | AndroidWorld | AutoGLM-Phone |
+|---|---|---|
+| `click` | `CLICK` | `Tap` |
+| `long_click` | `LONG_PRESS` | `Long Press` |
+| `set_text` | `INPUT_TEXT` | `Type` |
+| `scroll` | `SCROLL` | — |
+| `swipe` | `SWIPE` | `Swipe` |
+| `double_tap` | `DOUBLE_TAP` | `Double Tap` |
+| `enter` | `KEYBOARD_ENTER` | — |
+| `launch` | `OPEN_APP` | `Launch` |
+| `back` / `home` | `NAVIGATE_BACK` / `NAVIGATE_HOME` | `Back` / `Home` |
+| `wait` | `WAIT` | `Wait` |
+| `done(summary)` | `STATUS` + `ANSWER` | — |
+| `ask` | — | `Take_over` |
+| `note` | (M3A 的逐步 summary) | — |
+
+对照下来自己缺了三个,`swipe` / `double_tap` / `enter`,已经补上。前两个不是冗余:
+`scroll` 走 `ACTION_SCROLL_*`,只对**声明了自己可滚动**的容器有效,轮播图、侧边抽屉、
+左滑删除都不走这条;`enter` 的理由 AndroidWorld 在源码注释里写得很直白 ——
+有些控件光靠点是控制不了的,而且搜索框按回车提交比在树里找「搜索」按钮可靠得多。
+
+反过来有两个是自己想出来、后来发现和既有工作撞了的,算是旁证:
+`ask` 对应 AutoGLM 的 `Take_over`,`note` 对应 M3A 的逐步 summary(ReAct + Reflexion 那一路)。
+
+**感知方式的选择也在这里得到了印证。** AndroidWorld 同时给了两个基线:M3A 用
+Set-of-Mark 标注截图,T3A 纯文本无障碍树。论文的结果是文本方案与多模态相当、
+有时更好(T3A 用 GPT-4o 拿到 59.7% 的单步动作成功率)。这条独立支持了本项目
+第五节的选择 —— 何况在这里截图这条路本来就更窄:虚拟屏 `screencap` 抓不到,
+得自己接 `ImageReader`。
+
+**但这些工作都不解决本题的核心问题。** AndroidWorld 跑在模拟器里,AutoGLM-Phone
+接管的是用户正在看的那块屏,scrcpy 是远程控制 —— 三者都默认「这台设备此刻归 agent」。
+本题要的恰恰是**人和 agent 同时用同一台手机**,所以真正的工作量不在动作空间,
+而在第四、七节那些:副屏隔离、焦点归还、以及每个动作都得挑一条带显示器维度的实现。
+
+## 九、模型的输出到底有多大权力
 
 这套东西里有一个 uid 2000 的 shell(Shizuku 拉起的特权桥),所以「模型能让它执行什么」
 必须是个说得清的答案。
@@ -216,7 +258,7 @@ whoami: uid=2000(shell) ... context=u:r:shell:s0
 注入面: 干净 —— 参数没有被 sh 解析
 ```
 
-## 九、已知边界
+## 十、已知边界
 
 - **Shizuku 每次设备重启要重新激活。** 这是 Android 无线调试的设计,不是能绕过的。
 - **副屏上的 App 是独立实例。** 用户在主屏登录的账号,副屏上的同一个 App 共享登录态

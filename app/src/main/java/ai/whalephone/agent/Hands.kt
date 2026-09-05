@@ -25,11 +25,44 @@ class Hands(
 ) {
     private val ctxRef = ctx
     private val clipboard = ClipboardGuard(ctx)
+    // 副屏是按物理屏尺寸造的(AgentService 用的就是这份 metrics),所以可以直接拿来当屏幕手势的画布
+    private val metrics = ctx.resources.displayMetrics
     private var last: Perception.Snapshot? = null
 
     fun snapshot(): Perception.Snapshot = svc.snapshotOf(displayId).also { last = it }
 
     private fun el(i: Int) = last?.byIndex(i)
+
+    /**
+     * 一个动作有没有真的生效,唯一可靠的判据是**界面动没动** —— 返回值一律不信。
+     *
+     * 无障碍动作和注入的按键都可能「成功地什么也没做」:节点收下 ACTION_CLICK 但
+     * 只挂了 onTouchListener、往不可滚动的容器上划、对不响应返回的页面按返回。
+     * 这类失败是静默的,日志干净、返回值成功,只有屏幕知道。模型拿不到失败信号
+     * 就会一直重复,直到被判卡死。
+     *
+     * 所以凡是可能静默失效的动作,都从这里过一遍,让失败变成显式的。
+     */
+    private inline fun changed(act: () -> Unit): Boolean {
+        val eyes = svc as? EyesAndHands
+        val before = runCatching { svc.snapshotOf(displayId).render() }.getOrNull()
+        val t = SystemClock.uptimeMillis()
+        act()
+        Thread.sleep(SETTLE_MS)
+
+        // 两个判据各有各的偏差,所以取并集:
+        //   无障碍事件 —— 灵敏,纯视觉的变化(轮播图滚动)也能捕捉到,但会被
+        //                 广告轮播、懒加载这类和本次动作无关的活动带出误报;
+        //   渲染快照   —— 就是模型眼里的那份视图,和卡死检测同一个判据,
+        //                 但页面慢了会在 500ms 内看不出变化。
+        // 宁可偶尔漏判「没生效」,也不能误判「没生效」—— 后者会让 click 补第二次
+        // 真实触摸,而那一下会把已经生效的操作再做一遍(购物 App 上就是重复下单)。
+        val byEvent = eyes?.changedSince(displayId, t) ?: true
+        val byRender = before == null || runCatching { svc.snapshotOf(displayId).render() }
+            .getOrNull() != before
+        if (byEvent != byRender) Log.i(TAG, "变化判据不一致 事件=$byEvent 快照=$byRender")
+        return byEvent || byRender
+    }
 
     /**
      * 两级降级,和 setText 一样不信返回值 —— 只信界面动没动:
@@ -42,19 +75,13 @@ class Hands(
      */
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
-        val t = SystemClock.uptimeMillis()
-        val ok = Actions.click(e)
-        Thread.sleep(CLICK_SETTLE_MS)
-        val eyes = svc as? EyesAndHands
-        if (ok && (eyes == null || eyes.changedSince(displayId, t)))
-            return "已点击 [$i] ${e.label()}"
+        if (changed { Actions.click(e) }) return "已点击 [$i] ${e.label()}"
 
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点击 [$i] 失败"
-        Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
-        Thread.sleep(CLICK_SETTLE_MS)
-        return if (eyes == null || eyes.changedSince(displayId, t))
-            "已点击 [$i] ${e.label()}(无障碍点击无效,补了一次真实触摸)"
+        if (b.isEmpty) return "点了 [$i] ${e.label()},界面没反应,而且拿不到它的位置,补不了触摸"
+        return if (changed {
+                Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
+            }) "已点击 [$i] ${e.label()}(无障碍点击无效,补了一次真实触摸)"
         else "点了 [$i] ${e.label()},但界面没有任何反应 —— 这个元素点不动,换一个"
     }
 
@@ -86,17 +113,74 @@ class Hands(
         return "[$i] 三种写法都没写进去,这个控件可能不接受外部输入"
     }
 
+    /**
+     * 坐标划动。和 scroll 是两个动作,分工明确:
+     *   scroll —— 语义滚动,走 ACTION_SCROLL_*,只对**声明了自己可滚动**的容器有效
+     *   swipe  —— 真实划动,轮播图、侧边抽屉、左滑删除这类不实现 ACTION_SCROLL 的交互只认它
+     *
+     * AndroidWorld 的动作空间里这两者也是分开的,不是冗余。
+     * 不给 index 就在整块副屏上划。
+     */
+    fun swipe(i: Int?, direction: String): String {
+        val b = if (i == null) Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
+                else el(i)?.let { e -> Rect().also { e.node.getBoundsInScreen(it) } }
+                    ?: return "没有序号 $i 这个元素"
+        if (b.isEmpty) return "[$i] 拿不到位置,划不了"
+
+        // 只划到中心距边缘的 35%,不贴边 —— 贴边会触发系统的侧滑返回手势
+        val cx = b.centerX(); val cy = b.centerY()
+        val dx = b.width() * 35 / 100; val dy = b.height() * 35 / 100
+        val (ex, ey) = when (direction) {
+            "up"    -> cx to cy - dy     // 手指往上划,内容往上走,看到的是下面的东西
+            "down"  -> cx to cy + dy
+            "left"  -> cx - dx to cy
+            "right" -> cx + dx to cy
+            else    -> return "方向只能是 up / down / left / right,收到的是「$direction」"
+        }
+        val where = if (i == null) "副屏" else "[$i]"
+        return if (changed {
+                Privileged.execArgs("input", "-d", "$displayId", "swipe", "$cx", "$cy", "$ex", "$ey", "300")
+            }) "已在$where 上向 $direction 划了一下"
+        else "在$where 上向 $direction 划了,但界面没有任何反应 —— 这里划不动,换个位置或换个动作"
+    }
+
+    /**
+     * 回车 / 搜索键。输入框填完直接按它提交,比在无障碍树里找「搜索」按钮可靠 ——
+     * 那个按钮不一定在树里,也不一定叫「搜索」。AndroidWorld 把 KEYBOARD_ENTER
+     * 单列成一个动作,理由是有些控件光靠点是控制不了的。
+     */
+    fun enter() = key(66)
+
+    fun doubleTap(i: Int): String {
+        val e = el(i) ?: return "没有序号 $i 这个元素"
+        val b = Rect().also { e.node.getBoundsInScreen(it) }
+        if (b.isEmpty) return "[$i] 拿不到位置"
+        return if (changed {
+                repeat(2) {
+                    Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
+                }
+            }) "已双击 [$i] ${e.label()}"
+        else "双击 [$i] 后界面没有任何反应"
+    }
+
     fun scroll(i: Int, forward: Boolean): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
-        return if (Actions.scroll(e, forward)) "已滚动 [$i]" else "[$i] 滚不动了(到头了)"
+        var accepted = false
+        if (changed { accepted = Actions.scroll(e, forward) }) return "已滚动 [$i]"
+        return if (accepted) "[$i] 收下了滚动但界面没动 —— 到头了,或者这个容器只认真实划动,试试 swipe"
+        else "[$i] 滚不动(它没有声明自己可滚动)—— 试试 swipe"
     }
 
     /** 带显示器维度的按键。这是唯一必须借 shell 的动作。 */
     fun key(code: Int): String {
-        val out = Privileged.execArgs("input", "-d", "$displayId", "keyevent", "$code")
-        return if (out.isBlank() || out == "NO_BRIDGE") {
-            if (out == "NO_BRIDGE") "按键失败:特权桥没连上" else "已按键 $code"
-        } else "按键 $code: ${out.trim()}"
+        var out = ""
+        val moved = changed { out = Privileged.execArgs("input", "-d", "$displayId", "keyevent", "$code") }
+        return when {
+            out == "NO_BRIDGE" -> "按键失败:特权桥没连上"
+            out.isNotBlank()   -> "按键 $code: ${out.trim()}"
+            moved              -> "已按键 $code"
+            else               -> "按了 $code,但界面没有任何反应"
+        }
     }
 
     fun back() = key(4)
@@ -168,8 +252,8 @@ class Hands(
     companion object {
         private const val TAG = "WPHands"
         private const val LAUNCH_TIMEOUT_MS = 25_000L
-        /** 点完等界面反应的时间。太短会把「慢」误判成「点不动」而多补一次触摸。 */
-        private const val CLICK_SETTLE_MS = 500L
+        /** 动作之后等界面反应的时间。太短会把「慢」误判成「没生效」。 */
+        private const val SETTLE_MS = 500L
 
         /**
          * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是
