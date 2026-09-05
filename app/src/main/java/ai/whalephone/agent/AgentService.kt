@@ -102,11 +102,15 @@ class AgentService : Service() {
                         return
                     }
                 }
-                AgentDisplay.create(
-                    resources.displayMetrics.widthPixels,
-                    resources.displayMetrics.heightPixels,
-                    resources.displayMetrics.densityDpi,
-                )?.also { shared = it }
+                // 强制竖屏。displayMetrics 反映的是**服务此刻的配置**,机主把手机横过来
+                // 那一刻造屏,宽高就是反的 —— 真机上造出过一块 2340x1080 的副屏,
+                // 手机 App 在上面走的是平板/DeX 布局,和机主自己看到的完全两样,
+                // 模型按平板布局做的决策也就对不上。副屏是给手机 App 用的,
+                // 它的形状不该由机主此刻怎么拿手机决定。
+                val m = resources.displayMetrics
+                val w = minOf(m.widthPixels, m.heightPixels)
+                val h = maxOf(m.widthPixels, m.heightPixels)
+                AgentDisplay.create(w, h, m.densityDpi)?.also { shared = it }
             } ?: run { finish("副屏创建失败"); return }
             displayId = d.displayId
             Log.i(TAG, "副屏 ${d.displayId} 就绪: ${d.guarantees()}")

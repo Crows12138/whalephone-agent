@@ -30,7 +30,27 @@ class Hands(
     private val metrics = ctx.resources.displayMetrics
     private var last: Perception.Snapshot? = null
 
-    fun snapshot(): Perception.Snapshot = svc.snapshotOf(displayId).also { last = it }
+    fun snapshot(): Perception.Snapshot {
+        val s = svc.snapshotOf(displayId)
+        // 无障碍一个包都报不出来的时候,不能直接告诉模型「这块屏是空的」——
+        // 那可能只是节点树读不到。多花一趟 shell 问一下窗口管理器,它说了算。
+        // 只在读不到的时候问,正常路径没有额外开销。
+        val fixed = if (s.packages.isEmpty()) s.copy(wmSays = topOnDisplay()) else s
+        last = fixed
+        return fixed
+    }
+
+    /** 窗口管理器认为这块屏上最前面的是谁。读不到返回 null。 */
+    private fun topOnDisplay(): String? {
+        val out = Privileged.exec(
+            "dumpsys activity activities | sed -n '/Display #$displayId /,/^Display #/p'" +
+                " | grep -m1 topResumedActivity"
+        ).trim()
+        if (out.startsWith("NO_BRIDGE") || out.startsWith("EXEC_FAIL")) return null
+        val cmp = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+").find(out)?.groupValues?.get(1)
+        // 副屏上常驻的 DeX 桌面不算「有 App」,它一直都在
+        return cmp?.takeIf { !it.contains("launcher", true) && !it.contains("honeyspace", true) }
+    }
 
     private fun el(i: Int) = last?.byIndex(i)
 
@@ -334,6 +354,13 @@ class Hands(
             val s = snapshot()
             if (s.packages.any { it == pkg }) {
                 return "已在副屏打开 $pkg,当前 ${s.elements.size} 个可交互元素"
+            }
+            // 窗口管理器说它已经在这块屏上了,只是无障碍这一刻读不到它的节点树。
+            // 这也算启动成功 —— 再等下去只会等满超时,然后模型又去启一次,
+            // 而每启一次都用 --activity-multiple-task 多堆一个 task,越堆越乱。
+            if (s.wmSays == pkg) {
+                return "$pkg 已经在副屏上了(窗口管理器确认),但这一刻读不到它的界面。" +
+                    "别再启动它,先 wait 再看一眼"
             }
         }
         return "启动 $pkg 后等了 ${LAUNCH_TIMEOUT_MS / 1000} 秒界面还没出来,可能是启动慢或者被系统拦了"

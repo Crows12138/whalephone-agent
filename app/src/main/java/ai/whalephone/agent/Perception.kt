@@ -55,14 +55,29 @@ object Perception {
         val displayId: Int,
         val packages: List<String>,
         val elements: List<Element>,
+        /**
+         * 无障碍什么都读不到时,窗口管理器说这块屏上是什么。
+         *
+         * 为什么需要这一条:`w.root` 为 null 的窗口会被整个跳过,于是 packages 是空的,
+         * 渲染出来是「这块屏上还没有打开任何 App」。但 App 可能好好地在上面,
+         * 只是那一刻读不到它的节点树(冷启动中、或者应用自己不给读)。
+         * 这两句话对模型的含义正好相反:前者该 launch,后者该等。真机上因为这个
+         * 分不清,模型连着重启了四次淘宝,每次等满 25 秒,最后判卡死 ——
+         * 而淘宝全程都在副屏上好好待着。
+         */
+        val wmSays: String? = null,
     ) {
         fun render(): String = buildString {
             appendLine("显示器 $displayId  前台: ${packages.joinToString(", ").ifBlank { "(空)" }}")
             // 「空」对模型是个歧义信号:可能是界面没加载完,也可能是这块屏上压根没开 App。
             // 不说清楚它会反复按 home 或 back 想「退回去」,而这块屏根本没有可退的地方。
             if (elements.isEmpty()) appendLine(
-                if (packages.isEmpty()) "(这块屏上还没有打开任何 App,用 launch 打开一个)"
-                else "(界面还没渲染出可交互元素,可以 wait 一下)"
+                when {
+                    packages.isNotEmpty() -> "(界面还没渲染出可交互元素,可以 wait 一下)"
+                    wmSays != null -> "($wmSays 就在这块屏上,只是这一刻读不到它的界面 —— " +
+                        "别重启它,等一下再看)"
+                    else -> "(这块屏上还没有打开任何 App,用 launch 打开一个)"
+                }
             )
             elements.forEach { appendLine(it.render()) }
         }
