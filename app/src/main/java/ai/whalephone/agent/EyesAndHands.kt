@@ -218,9 +218,16 @@ class EyesAndHands : AccessibilityService() {
         val shown = Privileged.exec("dumpsys input_method | grep -m1 mInputShown").trim()
         val noBridge = shown.startsWith("NO_BRIDGE") || shown.startsWith("EXEC_FAIL")
         val byShell = shown.contains("mInputShown=true")
+        // 探针必须报**上线的那个判断**的结果,不能自己再算一遍。
+        // 原来这里就是重算了一遍原始信号「主屏上有没有 IME 窗口」,于是
+        // Conflict.ownerTyping 里加的「这个键盘是为谁开的」那一层它完全看不见:
+        // agent 明明照常开工了,探针还在报「机主在打字」。测一份副本不是测产品。
+        val verdict = Conflict.ownerTyping(this)
         Log.i(TAG, "---- TYPING ----")
-        Log.i(TAG, "  无障碍: $byA11y   (主屏窗口类型: $types)")
-        Log.i(TAG, "  IMMS  : ${if (noBridge) "测不了" else "$byShell"}  ($shown)")
+        Log.i(TAG, "  判据结论: $verdict   ← 让路机制真正用的就是这个")
+        Log.i(TAG, "  原始信号 无障碍: $byA11y   (主屏窗口类型: $types)")
+        Log.i(TAG, "  原始信号 IMMS  : ${if (noBridge) "测不了" else "$byShell"}  ($shown)")
+        if (byA11y && !verdict) Log.i(TAG, "  主屏有输入法窗口,但它服务的是本 app 自己的输入框,不算打扰")
         Log.i(TAG, when {
             // 桥没连的时候 IMMS 那一路根本没读到东西,不能拿它去和无障碍比对 ——
             // 那会报出一个假的「两路不一致」,比没有这条检查还糟。

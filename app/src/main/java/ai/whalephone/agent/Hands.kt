@@ -380,7 +380,7 @@ object Conflict {
             svc.windowsOnAllDisplays.get(USER_DISPLAY)
                 ?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
         }.getOrDefault(false)
-        if (byA11y) { a11ySeenIme = true; return true }
+        if (byA11y) { a11ySeenIme = true; return !imeServesUs(svc) }
 
         // 无障碍说「没有输入法窗口」时,不能就这么信。
         //
@@ -397,11 +397,33 @@ object Conflict {
         val shown = Privileged.exec("dumpsys input_method | grep -m1 mInputShown")
         val byShell = shown.contains("mInputShown=true")
         if (byShell) Log.w("WPConflict", "无障碍没报告输入法窗口,但 IMMS 说键盘开着 —— 以 IMMS 为准")
-        return byShell
+        // 兜底这条路同样要区分这个键盘是为谁开的,否则机主在 app 里刚打完任务点开始,
+        // 照样被自己挡住 —— 只是换了条代码路径。
+        return byShell && !imeServesUs(svc)
     }
 
     /** 无障碍是否曾经成功报出过 IME 窗口。没有的话就一直走 shell 兜底。 */
     @Volatile private var a11ySeenIme = false
+
+    /**
+     * 主屏上那个输入法,是在为 WhalePhone 自己的输入框服务吗。
+     *
+     * 这个区分是必需的,少了它主演示路径直接断掉:机主在 app 里打完任务、点「开始」,
+     * 点按钮不会自动收键盘,于是键盘还开着 —— agent 判定「机主在打字」,等满上限,
+     * 回一句「这一轮先不开工」。**他刚下的任务被他下达任务的动作挡住了。**
+     *
+     * 根子在于判据说的和想说的不是一回事:想说的是「机主正在往**他自己的**东西里打字,
+     * 现在抢焦点会让他丢掉推不回来的输入状态」,而实际判的只是「主屏上有输入法窗口」。
+     * 输入法为我们自己服务时,那个前提不成立 —— 那是我们自己的窗口,而且机主刚按下
+     * 开始,他的意图就是让 agent 开工。
+     *
+     * 判不出来的时候按「是机主的」算:守着比放过安全。
+     */
+    private fun imeServesUs(svc: AccessibilityService): Boolean = runCatching {
+        val focused = svc.windowsOnAllDisplays.get(USER_DISPLAY)
+            ?.firstOrNull { it.isFocused && it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        focused?.root?.packageName?.toString() == svc.packageName
+    }.getOrDefault(false)
 
     /**
      * 机主在打字就先让路,返回让了多少毫秒。
