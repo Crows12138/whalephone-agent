@@ -127,7 +127,12 @@ object A11yGate {
      * 让调用方记得。
      */
     fun close(ctx: Context) {
-        if (Config.get(ctx, MARK) != "1") return
+        // 不能静默返回:这条路走过之后权限是留着的,而机主看到的后果是付不了微信。
+        // 看不到日志就分不清「不该关(是他自己开的)」和「出错了」。真机上为这个查过一次。
+        if (Config.get(ctx, MARK) != "1") {
+            Log.i(TAG, "无障碍不是我们打开的,不关 —— 保持机主自己的设置")
+            return
+        }
         if (Watch.plan(ctx) != null) { Log.i(TAG, "还有长时任务在盯着,权限先留着"); return }
         // 读不到就一步都不动,MARK 也留着 —— 下次起来还认得出这摊没收拾完。
         val left = (services() ?: run { Log.w(TAG, "读不到无障碍服务表,这次不收尾,记号留着"); return })

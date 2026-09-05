@@ -166,12 +166,24 @@ object Privileged {
         // 等得宽一点是有代价考虑的:等太短会把「还没注册上」误判成「看不见」,
         // 于是白白补 PUBLIC 重造一块 —— 在本来就看得见私有屏的 ROM(三星)上,
         // 那是平白把屏改成公开的,可能牵动 DeX 之类的行为。宁可多等两秒。
-        repeat(12) {
-            if (svc.windowsOnAllDisplays.indexOfKey(displayId) >= 0) {
+        // 「这块屏不在列表里」有两种原因,必须分开:
+        //   a. 这台 ROM 的无障碍看不见私有虚拟屏(原生 AOSP 就是这样)—— 真的要补 PUBLIC
+        //   b. 无障碍服务自己刚连上,窗口列表还是空的 —— 再等等就有了
+        // 不分开的后果真机上撞到了:特权桥重启、无障碍跟着重连,那一瞬列表是空的,
+        // 于是把三星误判成「看不见」,平白把屏改成公开的。
+        var sawAnything = false
+        repeat(24) {
+            val wins = svc.windowsOnAllDisplays
+            if (wins.size() > 0) sawAnything = true
+            if (wins.indexOfKey(displayId) >= 0) {
                 Log.i(TAG, "无障碍看得见副屏 $displayId,保持私有屏")
                 return true
             }
             Thread.sleep(250)
+        }
+        if (!sawAnything) {
+            Log.w(TAG, "无障碍一块屏都报不出来 —— 是它还没就绪,不是看不见副屏,不改 flags")
+            return true
         }
         return false
     }
