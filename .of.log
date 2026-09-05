@@ -1,0 +1,11 @@
+uid=2000
+使用标志位 = 0x5e08
+    OWN_CONTENT_ONLY
+    TRUSTED
+    SHOW_SYSTEM_DECORATIONS
+    OWN_FOCUS
+    OWN_DISPLAY_GROUP
+    ALWAYS_UNLOCKED
+HOLD displayId=86 保持 120 秒
+唤醒锁已取,held=true
+Killed 

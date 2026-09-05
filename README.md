@@ -37,10 +37,12 @@ agent 的一切都发生在那上面;用无障碍服务跨屏读写,因为它是
 
 副屏那六个标志位不是凑的,每一位对应一个实测出来的冲突:`TRUSTED`(不受信的屏
 启不了第三方 App)、`OWN_CONTENT_ONLY`(不镜像主屏)、`SHOULD_SHOW_SYSTEM_DECORATIONS`、
-`OWN_FOCUS`(副屏自己维护焦点)、`OWN_DISPLAY_GROUP`、`ALWAYS_UNLOCKED`(锁屏后照常工作)。
+`OWN_FOCUS`(本机实测无效,保留备用)、`OWN_DISPLAY_GROUP`、`ALWAYS_UNLOCKED`(锁屏后照常工作)。
 
-**资源竞争**处理了七类:触摸注入、输入法、导航键、全局焦点、剪贴板、task 归属、
-副屏销毁。现象和各自的处理见 [TECH-CHOICES.md](TECH-CHOICES.md)。
+**资源竞争**处理了八类:触摸注入、输入法、导航键、全局焦点、焦点指针漂移、剪贴板、
+task 归属、副屏销毁。其中唯一真正会打扰到用户的是造副屏和往副屏启 App —— 这两下会
+收起用户的输入法,解法是紧跟一个带屏号的空按键把焦点还回去。现象和处理见
+[TECH-CHOICES.md](TECH-CHOICES.md)。
 
 **一条实测出来的边界**:副屏和主屏共用电源组,主屏息屏副屏跟着灭。所以 agent 的
 可工作时间等于用户的亮屏时间 —— 这和题目场景是对齐的,长时任务因此改成亮屏触发。

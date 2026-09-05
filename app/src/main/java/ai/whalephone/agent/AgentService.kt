@@ -25,7 +25,6 @@ import kotlin.concurrent.thread
  */
 class AgentService : Service() {
 
-    private var display: AgentDisplay? = null
     private var worker: Thread? = null
     private var feed: Thread? = null
     @Volatile private var stopping = false
@@ -62,10 +61,14 @@ class AgentService : Service() {
             note("开发模式 · 副屏 $devId")
         } else {
             if (!Privileged.connect(this)) { finish("特权桥没连上,检查 Shizuku 是否在运行并已授权"); return }
-            val m = resources.displayMetrics
-            val d = AgentDisplay.create(m.widthPixels, m.heightPixels, m.densityDpi)
-                ?: run { finish("副屏创建失败"); return }
-            display = d
+            // 副屏跨任务复用。造屏那一下会收起用户的输入法(虽然随后立刻还了回去,
+            // 但仍是一次可感知的抖动),每个任务重造一次就是每个任务抖一次。
+            // 造一次留着,只在用户明确停止时销毁。
+            val d = shared ?: AgentDisplay.create(
+                resources.displayMetrics.widthPixels,
+                resources.displayMetrics.heightPixels,
+                resources.displayMetrics.densityDpi,
+            )?.also { shared = it } ?: run { finish("副屏创建失败"); return }
             displayId = d.displayId
             Log.i(TAG, "副屏 ${d.displayId} 就绪: ${d.guarantees()}")
             note("副屏 ${d.displayId} 就绪 · ${d.guarantees()}")
@@ -87,7 +90,6 @@ class AgentService : Service() {
         // 长时任务:这一轮结束不等于任务结束
         if (Watch.plan(this) != null) {
             val changed = Watch.record(this, out.message)
-            display?.release(); display = null
             if (Watch.roundsLeft(this) <= 0) {
                 Watch.clear(this)
                 finish("盯完了。最后一次的结果:${out.message}")
@@ -111,7 +113,7 @@ class AgentService : Service() {
      */
     private fun startFeedIfAsked() {
         if (Config.get(this, KEY_DEMO_FEED) != "1") return
-        val d = display ?: run { Log.w(TAG, "开发模式下没有自己的副屏,取景窗开不了"); return }
+        val d = shared ?: run { Log.w(TAG, "开发模式下没有自己的副屏,取景窗开不了"); return }
         feed = thread(name = "wp-feed") {
             while (!stopping && worker?.isAlive != false) {
                 runCatching { d.captureTo(FEED_PATH) }
@@ -130,19 +132,20 @@ class AgentService : Service() {
     private fun stop() {
         stopping = true
         worker?.interrupt()
-        display?.release(); display = null
+        shared?.release(); shared = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun finish(msg: String) {
-        display?.release(); display = null
+        // 一次性任务结束也留着副屏:用户很可能接着下一个任务,重造一次就多抖一次。
+        // 真正销毁只发生在用户点「停止」,或者服务被系统回收。
         update("任务结束", msg, ongoing = false)
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
 
-    override fun onDestroy() { display?.release(); super.onDestroy() }
+    override fun onDestroy() { shared?.release(); shared = null; super.onDestroy() }
 
     // ---- 通知 ----
 
@@ -220,6 +223,9 @@ class AgentService : Service() {
         const val EXTRA_GOAL = "goal"
         const val KEY_DEV_DISPLAY = "DEV_DISPLAY_ID"
         const val KEY_DEMO_FEED = "DEMO_FEED"
+
+        /** 副屏跨任务复用,所以挂在伴生对象上而不是实例上 */
+        @Volatile private var shared: AgentDisplay? = null
         const val FEED_PATH = "/sdcard/Download/wp_vd.png"
 
         fun start(ctx: Context, goal: String) {

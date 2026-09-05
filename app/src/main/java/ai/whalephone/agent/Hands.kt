@@ -112,6 +112,8 @@ class Hands(
                 "\$(cmd package resolve-activity --brief $pkg | tail -1)"
         )
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
+        // 往副屏启 App 会抢焦点并收起用户的输入法,和造屏一样,立刻还回去
+        Privileged.handBackFocus()
         return if (out.contains("Error") || out.contains("Exception")) "启动 $pkg 失败: ${out.trim()}"
         else "已在副屏打开 $pkg"
     }
@@ -138,10 +140,6 @@ object Conflict {
 
     fun userIsUsing(svc: AccessibilityService, pkg: String): Boolean =
         userForegroundPackage(svc) == pkg
-
-    /** 副屏是否真的拿到了独立焦点。没拿到就退回「尽量少动焦点」的保守策略。 */
-    fun ownFocusEffective(display: AgentDisplay?): Boolean =
-        display != null && (display.flags and ShellBridge.OWN_FOCUS) != 0
 
     /** 用户那块屏永远是 0 —— 主显示器的 id 由系统固定 */
     const val USER_DISPLAY = 0

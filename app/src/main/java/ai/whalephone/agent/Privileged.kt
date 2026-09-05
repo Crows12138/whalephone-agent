@@ -91,4 +91,24 @@ object Privileged {
     }
 
     fun release(displayId: Int) { runCatching { bridge?.releaseDisplay(displayId) } }
+
+    /**
+     * 把全局焦点还给用户那块屏。
+     *
+     * 实测:造副屏、以及往副屏启 App,这两下会把 FocusedDisplayId 拽到副屏,
+     * 并且**收起用户正在用的输入法**(mInputShown 从 true 变 false)。这是整套
+     * 方案里唯一一处真正打扰到用户的地方。
+     *
+     * KEYCODE_UNKNOWN 是个空按键,界面上不产生任何效果,但它带着显示器维度进了
+     * InputDispatcher,足以把焦点指针推回 0 号屏,输入法跟着回来。实测焦点和
+     * mInputShown 都能恢复。
+     *
+     * (agent 后续的无障碍动作也会移动焦点指针,但那个**不需要**处理:输入投递
+     * 是按屏走的,用户手指按在物理屏上产生的事件天然带 0 号屏的归属,照样落进
+     * 他自己的输入框,而且会顺手把指针拽回来。实测 agent 连点 5 下之后用户接着
+     * 打字,一个字都没丢。)
+     */
+    fun handBackFocus() {
+        exec("input -d ${Conflict.USER_DISPLAY} keyevent 0")
+    }
 }
