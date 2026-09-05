@@ -25,6 +25,7 @@ private const val TAG = "WPEyes"
  *   SNAP  --ei display N          打印该屏的快照(模型看到的文本)
  *   CLICK --ei display N --es text S | --ei index I
  *   TEXT  --ei display N --ei index I --es text S
+ *   TYPING                        机主此刻在不在打字,两路信号分别报
  */
 class EyesAndHands : AccessibilityService() {
 
@@ -39,6 +40,7 @@ class EyesAndHands : AccessibilityService() {
                 ACT_CLICK -> click(d, i.getStringExtra("text"), i.getIntExtra("index", -1))
                 ACT_TEXT  -> setText(d, i.getIntExtra("index", -1), i.getStringExtra("text") ?: "")
                 ACT_BRIDGE -> Thread { bridgeSelfTest() }.start()
+                ACT_TYPING -> Thread { typingCheck() }.start()
                 ACT_RUN -> {
                     val g = i.getStringExtra("goal").orEmpty()
                     Log.i(TAG, "收到任务: $g")
@@ -72,6 +74,7 @@ class EyesAndHands : AccessibilityService() {
             IntentFilter().apply {
                 addAction(ACT_DUMP); addAction(ACT_SNAP); addAction(ACT_CLICK)
                 addAction(ACT_TEXT); addAction(ACT_BRIDGE); addAction(ACT_CONFIG); addAction(ACT_RUN)
+                addAction(ACT_TYPING)
             },
             Context.RECEIVER_EXPORTED,
         )
@@ -197,6 +200,28 @@ class EyesAndHands : AccessibilityService() {
      * 这里拿一个真实 payload 走一遍:参数里的 `;` 如果被 shell 解析,探针文件就会
      * 被创建出来。
      */
+    /**
+     * 「机主在不在打字」这个判据本身能不能信 —— 单独测,不要从整轮任务里反推。
+     *
+     * 两路信号分开报:无障碍窗口列表里的 IME 窗口、IMMS 的 mInputShown。
+     * 它们**应该**永远一致;不一致的那一路就是不能用的那一路。整轮任务跑完只能看到
+     * 「让了几次」,分不出「没让是因为机主没打字」还是「判据根本读不到」。
+     */
+    private fun typingCheck() {
+        val wins = runCatching { windowsOnAllDisplays.get(Conflict.USER_DISPLAY) }.getOrNull()
+        val types = wins?.joinToString(" ") { "${it.type}" } ?: "读不到"
+        val byA11y = wins?.any {
+            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+        } == true
+        val shown = Privileged.exec("dumpsys input_method | grep -m1 mInputShown").trim()
+        val byShell = shown.contains("mInputShown=true")
+        Log.i(TAG, "---- TYPING ----")
+        Log.i(TAG, "  无障碍: $byA11y   (主屏窗口类型: $types)")
+        Log.i(TAG, "  IMMS  : $byShell  ($shown)")
+        Log.i(TAG, if (byA11y == byShell) "  两路一致 —— 判据可信"
+                   else "  两路不一致 —— 无障碍这条不能单独用,让路机制会走 IMMS 兜底")
+    }
+
     private fun injectionCheck() {
         val probe = "/data/local/tmp/wp_inject_probe"
         Privileged.exec("rm -f $probe")
@@ -249,6 +274,7 @@ class EyesAndHands : AccessibilityService() {
         const val ACT_CLICK = "ai.whalephone.agent.CLICK"
         const val ACT_TEXT  = "ai.whalephone.agent.TEXT"
         const val ACT_BRIDGE = "ai.whalephone.agent.BRIDGE"
+        const val ACT_TYPING = "ai.whalephone.agent.TYPING"
         const val ACT_CONFIG = "ai.whalephone.agent.CONFIG"
         const val ACT_RUN = "ai.whalephone.agent.RUN"
     }

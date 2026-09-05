@@ -375,9 +375,33 @@ object Conflict {
      * 而且每次都要一趟 shell 往返,这个判断在每个动作前都要做。无障碍的窗口列表本来
      * 就是按显示器分的,问的正好是要问的那件事。
      */
-    fun ownerTyping(svc: AccessibilityService): Boolean =
-        svc.windowsOnAllDisplays.get(USER_DISPLAY)
-            ?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+    fun ownerTyping(svc: AccessibilityService): Boolean {
+        val byA11y = runCatching {
+            svc.windowsOnAllDisplays.get(USER_DISPLAY)
+                ?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+        }.getOrDefault(false)
+        if (byA11y) { a11ySeenIme = true; return true }
+
+        // 无障碍说「没有输入法窗口」时,不能就这么信。
+        //
+        // 这个判据本身还没在真机上量过,而它失败的方式是**静默的**:上报不到 IME 窗口
+        // 时它永远返回 false,让路机制一次都不触发,机主看到的现象和没修一模一样,
+        // 而日志里一片正常。这个项目已经在这类判据上栽过一次(数「字有没有丢」,
+        // 26/26 通过,机主真手指一试就断)。
+        //
+        // 所以在无障碍**从未**报出过 IME 窗口之前,每次都拿 IMMS 的状态兜一遍底。
+        // 它没有显示器维度,但这台机器上 mDisplayIdToShowIme 实测恒为 0,
+        // 也就是说 IME 只会在机主那块屏上 —— 对这个判断够用。
+        // 一旦无障碍证明过自己能报,就不再花这趟 shell 往返。
+        if (a11ySeenIme) return false
+        val shown = Privileged.exec("dumpsys input_method | grep -m1 mInputShown")
+        val byShell = shown.contains("mInputShown=true")
+        if (byShell) Log.w("WPConflict", "无障碍没报告输入法窗口,但 IMMS 说键盘开着 —— 以 IMMS 为准")
+        return byShell
+    }
+
+    /** 无障碍是否曾经成功报出过 IME 窗口。没有的话就一直走 shell 兜底。 */
+    @Volatile private var a11ySeenIme = false
 
     /**
      * 机主在打字就先让路,返回让了多少毫秒。
@@ -398,7 +422,9 @@ object Conflict {
     fun yieldWhileOwnerTypes(svc: AccessibilityService, timeoutMs: Long = 60_000): Long {
         if (!ownerTyping(svc)) return 0
         val t0 = SystemClock.uptimeMillis()
-        while (ownerTyping(svc) && SystemClock.uptimeMillis() - t0 < timeoutMs) Thread.sleep(250)
+        // 500 毫秒一轮:走 shell 兜底那条路时每轮是一次 dumpsys,不能太密;
+        // 而机主打完字到 agent 恢复晚半秒,没有任何影响。
+        while (ownerTyping(svc) && SystemClock.uptimeMillis() - t0 < timeoutMs) Thread.sleep(500)
         val waited = SystemClock.uptimeMillis() - t0
         Log.i("WPConflict", "机主在打字,让了 $waited 毫秒")
         return waited
