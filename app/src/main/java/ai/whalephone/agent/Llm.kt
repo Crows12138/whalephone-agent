@@ -21,7 +21,32 @@ class Llm(
 ) {
     class Message(val role: String, val content: String)
 
+    /**
+     * 带重试。一次瞬时网络错误不该让整个任务前功尽弃 —— 实测跑到第 7 步时
+     * 一个 Connection reset 就把前面全丢了,而手机上网络本来就会抖。
+     *
+     * 只重试传输层错误和 5xx / 429。4xx(密钥错、参数错)重试多少次都一样,
+     * 立刻抛出去让用户看见真正的原因。
+     */
     fun chat(messages: List<Message>, temperature: Double = 0.0, timeoutMs: Int = 60_000): String {
+        var last: Throwable? = null
+        repeat(RETRIES) { n ->
+            if (n > 0) Thread.sleep(1000L * (1 shl (n - 1)))   // 1s, 2s
+            try {
+                return once(messages, temperature, timeoutMs)
+            } catch (t: Throwable) {
+                if (t is Permanent) throw t.cause ?: t
+                last = t
+                Log.w(TAG, "第 ${n + 1} 次调用失败(${t.message}),${if (n + 1 < RETRIES) "重试" else "放弃"}")
+            }
+        }
+        throw last ?: RuntimeException("LLM 调用失败")
+    }
+
+    /** 不该重试的错误(4xx),用它包一层带出去 */
+    private class Permanent(cause: Throwable) : RuntimeException(cause)
+
+    private fun once(messages: List<Message>, temperature: Double, timeoutMs: Int): String {
         val url = URL(baseUrl.trimEnd('/') + "/chat/completions")
         val body = JSONObject().apply {
             put("model", model)
@@ -48,7 +73,8 @@ class Llm(
             val text = stream.bufferedReader().use(BufferedReader::readText)
             if (code !in 200..299) {
                 Log.e(TAG, "HTTP $code: ${text.take(500)}")
-                throw RuntimeException("LLM HTTP $code")
+                val e = RuntimeException("LLM HTTP $code: ${text.take(200)}")
+                throw if (code in 400..499 && code != 429) Permanent(e) else e
             }
             JSONObject(text).getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").getString("content")
@@ -57,7 +83,10 @@ class Llm(
         }
     }
 
-    companion object { private const val TAG = "WPLlm" }
+    companion object {
+        private const val TAG = "WPLlm"
+        private const val RETRIES = 3
+    }
 }
 
 /**

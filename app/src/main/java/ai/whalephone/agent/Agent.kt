@@ -100,7 +100,11 @@ class Agent(
                     if (v.isNotBlank()) notes += v
                     record(n, thought, name, "记下了:$v")
                 }
-                else -> record(n, thought, name, execute(name, act))
+                // 参数缺了、类型不对、序号越界 —— 这些不该杀掉整个任务。
+                // 模型下一轮看得到错在哪,自己就能改;抛出去则是一步走错、满盘皆输。
+                else -> record(n, thought, name,
+                    runCatching { execute(name, act) }
+                        .getOrElse { "这个动作的参数不对(${it.message});照着动作表把参数补齐再来一次" })
             }
         }
         return Outcome(false, "走满 $maxSteps 步还没完成", trace)
@@ -115,7 +119,13 @@ class Agent(
                                     a.optString("direction", "up"))
         "double_tap" -> hands.doubleTap(a.getInt("index"))
         "enter"      -> hands.enter()
-        "launch"     -> hands.launch(a.getString("package"))
+        // 模型给这个参数起过 package / app / name 三种名字,都收下 ——
+        // 与其在提示词里反复强调字段名,不如让接口宽容一点。
+        "launch"     -> hands.launch(
+            listOf("package", "app", "name", "app_name")
+                .firstNotNullOfOrNull { k -> a.optString(k).takeIf { it.isNotBlank() } }
+                ?: throw IllegalArgumentException("launch 要一个 package 参数(app 显示名或包名)")
+        )
         "back"       -> hands.back()
         "home"       -> hands.home()
         "wait"       -> { Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下" }
@@ -191,7 +201,7 @@ class Agent(
                           —— 真实划动。轮播图、侧边抽屉、左滑删除这些 scroll 滚不动的,用它
               double_tap  index
               enter       (无参数,回车/搜索键)
-              launch      package(应用包名)
+              launch      package(app 的显示名或包名都行,比如「淘宝」「计算器」;不用猜包名)
               back        (无参数,只在副屏上返回)
               home        (无参数,回副屏自己的桌面;界面乱了就用它重来)
               wait        ms

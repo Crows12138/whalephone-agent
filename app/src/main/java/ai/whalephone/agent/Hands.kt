@@ -45,7 +45,11 @@ class Hands(
      */
     private inline fun changed(act: () -> Unit): Boolean {
         val eyes = svc as? EyesAndHands
-        val before = runCatching { svc.snapshotOf(displayId).render() }.getOrNull()
+        // 基线直接用这一步开头已经拍过的那份快照。
+        // 原来在这里现拍一次 —— 那次遍历会让 last 里的节点句柄失效,
+        // 于是紧接着的 performAction 落空:动作没生效,判据也就说「没变化」,
+        // 一个自己造出来又自己确认的假象。实测三星计算器每个数字键都栽在这上面。
+        val before = last?.render()
         val t = SystemClock.uptimeMillis()
         act()
         Thread.sleep(SETTLE_MS)
@@ -64,25 +68,41 @@ class Hands(
         return byEvent || byRender
     }
 
+    /** 上一次点的是谁。模型重复点同一个元素,是「上一次没起作用」最可靠的证据。 */
+    private var lastClicked: Pair<Int, String>? = null
+
     /**
-     * 两级降级,和 setText 一样不信返回值 —— 只信界面动没动:
-     *   1. ACTION_CLICK   —— 标准控件都吃这套,而且不产生任何真实触摸事件
-     *   2. 往这块屏注入一次真实点击 —— 只挂了 onTouchListener 的自定义控件只认这个。
-     *      带 `-d 屏号`,事件进的是 agent 这块屏的 InputDispatcher,到不了用户那块屏。
+     * 两级:先无障碍点击,不行才补一次真实触摸。
      *
-     * 没有第二级的时候,模型会对着一个「点了返回 true 但什么也不会发生」的按钮
-     * 一直点到被判卡死 —— 它拿不到任何失败信号。实测淘宝商品详情页的店铺入口就是。
+     * 难点是**什么时候算「不行」**。一开始我用「界面动没动」来判,结果两头都出事:
+     *   - 漏判(界面其实变了却没测到)会补第二次触摸,把已经生效的操作再做一遍。
+     *     实测三星计算器按 128,补出来是 122 —— 换成购物 App 就是重复下单。
+     *   - 而 performAction 的返回值又不能信:淘宝详情页的店铺按钮只挂 onTouchListener,
+     *     节点收下动作、返回 true,什么也不会发生。
+     *
+     * 所以判据不该由我猜,应该看模型的行为:**它又点了同一个元素**,就说明上一次
+     * 确实没起作用 —— 这个信号来自真实后果,不来自我的检测。代价是那种按钮要多花
+     * 一步,换来的是永远不会把一个已生效的操作做第二遍。
+     *
+     * 无障碍点击直接返回 false 的,不用等重试,当场就补。
      */
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
-        if (changed { Actions.click(e) }) return "已点击 [$i] ${e.label()}"
+        val who = i to e.label()
+        val again = lastClicked == who
+        lastClicked = who
+
+        val ok = Actions.click(e)
+        Thread.sleep(SETTLE_MS)
+        if (ok && !again) return "已点击 [$i] ${e.label()}"
 
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        if (b.isEmpty) return "点了 [$i] ${e.label()},界面没反应,而且拿不到它的位置,补不了触摸"
-        return if (changed {
-                Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
-            }) "已点击 [$i] ${e.label()}(无障碍点击无效,补了一次真实触摸)"
-        else "点了 [$i] ${e.label()},但界面没有任何反应 —— 这个元素点不动,换一个"
+        if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点不动 [$i],也拿不到它的位置"
+        val moved = changed {
+            Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
+        }
+        return if (moved) "已点击 [$i] ${e.label()}(无障碍点击对它无效,改用真实触摸)"
+        else "点了 [$i] ${e.label()},界面仍然没有反应 —— 这个元素点不动,换一个"
     }
 
     fun longClick(i: Int): String {
@@ -210,12 +230,53 @@ class Hands(
      * 如果目标 App 已经在用户那块屏上开着,不加这个参数系统会把用户正在用的那个 task
      * 整个搬到副屏来 —— 用户会看着自己的微信凭空消失。实测踩过。
      */
-    fun launch(pkg: String): String {
+    /**
+     * 把「用户说的名字」变成包名。
+     *
+     * 模型不可能知道这台机器上装的是哪个计算器 —— 实测它依次猜了
+     * com.google.android.calculator 和 com.android.calculator2,而三星上叫
+     * com.sec.android.app.popupcalculator。让模型猜包名本来就是设计错误:
+     * 这个信息在设备上是现成的,查一下就有。AndroidWorld 的 OPEN_APP 收的
+     * 也是 app 名字而不是包名,同一个道理。
+     */
+    private fun resolvePackage(q: String): Pair<String?, List<String>> {
+        val pm = ctxRef.packageManager
+        if (runCatching { pm.getPackageInfo(q, 0) }.isSuccess) return q to emptyList()
+
+        val apps = runCatching {
+            pm.queryIntentActivities(
+                android.content.Intent(android.content.Intent.ACTION_MAIN)
+                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0
+            ).map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+        }.getOrDefault(emptyList())
+
+        val k = q.lowercase()
+        val hit = apps.firstOrNull { it.first.equals(q, true) }
+            ?: apps.firstOrNull { it.first.lowercase().contains(k) || k.contains(it.first.lowercase()) }
+            ?: apps.firstOrNull { it.second.lowercase().contains(k) }
+        // 没命中就把名字相近的报回去,让模型自己挑,而不是让它继续瞎猜
+        val near = apps.filter { a -> k.split(" ", "-", ".").any { it.length > 1 && a.first.lowercase().contains(it) } }
+            .take(8).map { "${it.first}(${it.second})" }
+        return hit?.second to near
+    }
+
+    fun launch(nameOrPkg: String): String {
+        val (resolved, near) = resolvePackage(nameOrPkg)
+        val pkg = resolved ?: return buildString {
+            append("这台设备上找不到「$nameOrPkg」")
+            if (near.isNotEmpty()) append(";名字相近的有:${near.joinToString("、")}")
+            else append(",换个说法试试(可以直接写 app 的显示名,比如「计算器」)")
+        }
+        return launchPkg(pkg)
+    }
+
+    private fun launchPkg(pkg: String): String {
         if (Conflict.userIsUsing(svc, pkg)) {
             return "用户此刻正在前台用 $pkg,为避免把他的界面搬走,这一步先跳过;" +
                 "换个不冲突的做法,或者 ask 请示"
         }
         if (!PKG.matches(pkg)) return "「$pkg」不是合法的包名"
+
 
         // 原来这里是 `am start ... $(cmd package resolve-activity --brief $pkg | tail -1)`,
         // 一条 sh 命令里既有命令替换又有模型给的 pkg。拆成两步:先解析组件名,

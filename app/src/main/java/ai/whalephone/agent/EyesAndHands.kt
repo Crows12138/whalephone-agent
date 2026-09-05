@@ -100,10 +100,18 @@ class EyesAndHands : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
+        if (Config.get(this, "TRACE_EVENTS") == "1")
+            Log.i(TAG, "evt 屏=${e.displayId} ${AccessibilityEvent.eventTypeToString(e.eventType)} pkg=${e.packageName}")
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_SCROLLED ->
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            // 有些控件把值藏在自己那儿,不进无障碍树 —— 三星计算器的输入框就是,
+            // 按了数字之后树里还是「计算器输入字段」。这时候唯一能证明「点生效了」
+            // 的就是这条文本变化事件。漏了它,每按一个数字都会被判成「点不动」,
+            // 然后还会多补一次真实触摸,把数字按两遍。
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ->
                 synchronized(lastChange) { lastChange.put(e.displayId, SystemClock.uptimeMillis()) }
         }
     }
