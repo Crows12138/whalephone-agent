@@ -5,7 +5,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
-import kotlin.concurrent.thread
+import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * agent 在副屏上的一双手。所有对外的操作都必须从这里走,因为
@@ -35,23 +35,19 @@ class Hands(
     private fun el(i: Int) = last?.byIndex(i)
 
     /**
-     * 往副屏注入一次真实输入,然后立刻把焦点还给机主。
+     * 往副屏注入一次真实输入。
      *
-     * 真实事件带着显示器维度进 InputDispatcher,会把**全局焦点屏**拽到副屏上,
-     * 机主的输入法当场被收起 —— 他正打字的话,手指会悬在半空。
-     * 实测机主真手指使用时,一个 27 步的任务打断了 6 次,52 次采样焦点不在主屏。
-     *
-     * 造副屏和往副屏启 App 这两处本来就记得还焦点,但那是散在调用点的约定,
-     * 而不是强制。今天新加 tap / swipe / enter 时我就忘了 —— 所以把它收进这里:
-     * 凡是真实注入,都从这条路走,想忘也忘不掉。
+     * 这里曾经在注入后补一句「把焦点还给机主」。那是错的,两头都错:焦点推得回去、
+     * 已经收起的软键盘推不回来;而那句补救本身是一个投递到主屏的按键事件,主屏此刻
+     * 恰恰没有焦点窗口,于是超时成「应用未响应」—— 补救动作制造了比它要修的问题
+     * 更严重的问题。真正的解法在 Conflict.yieldWhileOwnerTypes:事前避让,不是事后补。
      *
      * 注意无障碍动作(performAction)不走这里 —— 它根本不经过输入系统,不碰焦点。
      */
-    private fun inject(vararg argv: String): String {
-        val out = Privileged.execArgs(*argv)
-        Privileged.handBackFocus()
-        return out
-    }
+    private fun inject(vararg argv: String): String = Privileged.execArgs(*argv)
+
+    /** 机主在打字就先等着。每个动作前都过一遍,返回让了多少毫秒。 */
+    fun yieldToOwner(): Long = Conflict.yieldWhileOwnerTypes(svc)
 
     /**
      * 一个动作有没有真的生效,唯一可靠的判据是**界面动没动** —— 返回值一律不信。
@@ -311,37 +307,16 @@ class Hands(
             "am", "start", "--display", "$displayId", "--activity-multiple-task", "-n", resolved
         )
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
-        // am start 是异步的:这时候只是 Intent 递出去了,App 的窗口还没出现。
-        // 所以这里还一次不够 —— 窗口几秒后冒出来时会再把焦点抢走一次。
-        // 真正有效的一次在下面轮询到 App 出现之后。
-        Privileged.handBackFocus()
         if (out.contains("Error") || out.contains("Exception")) return "启动 $pkg 失败: ${out.trim()}"
 
         // am start 是异步的:命令返回成功只表示 Intent 递出去了,不表示界面起来了。
         // 淘宝这类 App 冷启动要好几秒,而循环下一帧快照在几百毫秒后就拍 —— 模型会
         // 看到一块空屏,以为没启成功,于是再启一次,连着几次就被判定卡死。
         // 所以这里同步等到目标 App 真的出现在这块屏上为止。
-        // 冷启动这段时间是整套东西里对机主危害最大的窗口。实测:
-        //   - am start 会把全局焦点挪到副屏,并**收起机主的软键盘**(唯一会收键盘的操作)
-        //   - 焦点不在机主那块屏时,他一碰屏幕,他的 app 就会
-        //     「Input dispatching timed out (Application does not have a focused window)」ANR
-        // 淘宝这类 App 冷启动要好几秒,所以不能只在启动前后各还一次焦点 ——
-        // 整个轮询期间每一轮都要把焦点推回去,把敞口压到最小。
-        // 冷启动期间开一条线程,高频把焦点钉回主屏。
         //
-        // ANR 的判据是「输入派发超时 5 秒」。注入类动作还焦点只要一个 shell 往返,
-        // 够不上 5 秒;能撑到的只有这里 —— App 冷启动要好几秒,期间副屏的窗口
-        // 反复抢焦点,和我们拉锯。放在轮询循环里还不够快:中间还夹着一次快照遍历,
-        // 实际间隔能到一两秒,焦点大部分时间仍在副屏,机主这时碰屏就 ANR。
-        val pin = thread(name = "wp-pin-focus") {
-            runCatching {
-                while (!Thread.currentThread().isInterrupted) {
-                    Privileged.handBackFocus()
-                    Thread.sleep(FOCUS_PIN_MS)
-                }
-            }
-        }
-        try {
+        // 这段冷启动期以前是「高频把焦点钉回主屏」的地方。那条线程已经删掉:它每
+        // 250 毫秒往主屏投一个按键事件,而主屏那时没有焦点窗口,等于每 250 毫秒
+        // 给机主的前台 App 递一颗 ANR 定时炸弹。A/B 实测 ANR 1 -> 0。
         val deadline = System.currentTimeMillis() + LAUNCH_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(700)
@@ -351,10 +326,6 @@ class Hands(
             }
         }
         return "启动 $pkg 后等了 ${LAUNCH_TIMEOUT_MS / 1000} 秒界面还没出来,可能是启动慢或者被系统拦了"
-        } finally {
-            pin.interrupt()
-            Privileged.handBackFocus()   // 收尾再钉一次,确保停在主屏
-        }
     }
 
     companion object {
@@ -362,8 +333,6 @@ class Hands(
         private const val LAUNCH_TIMEOUT_MS = 25_000L
         /** 动作之后等界面反应的时间。太短会把「慢」误判成「没生效」。 */
         private const val SETTLE_MS = 500L
-        /** 冷启动期间把焦点钉回主屏的间隔。够密才能压过副屏窗口的抢占。 */
-        private const val FOCUS_PIN_MS = 250L
 
         /**
          * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是
@@ -398,6 +367,42 @@ object Conflict {
 
     fun userIsUsing(svc: AccessibilityService, pkg: String): Boolean =
         userForegroundPackage(svc) == pkg
+
+    /**
+     * 机主此刻是不是正在打字 —— 判据是**他那块屏上有没有输入法窗口**。
+     *
+     * 不用 `dumpsys input_method` 的 mInputShown:那是 IMMS 的全局状态,没有显示器维度,
+     * 而且每次都要一趟 shell 往返,这个判断在每个动作前都要做。无障碍的窗口列表本来
+     * 就是按显示器分的,问的正好是要问的那件事。
+     */
+    fun ownerTyping(svc: AccessibilityService): Boolean =
+        svc.windowsOnAllDisplays.get(USER_DISPLAY)
+            ?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+
+    /**
+     * 机主在打字就先让路,返回让了多少毫秒。
+     *
+     * 这是「不打扰」这条要求在代码里唯一真正管用的地方,原因是实测出来的:
+     * 副屏上一出现可获焦窗口,窗口管理器就把顶层焦点屏切过去;主屏没有 OWN_FOCUS
+     * (那是造屏时的 flag,主屏加不上),于是 `findFocusedWindowIfNeeded` 给它返回 null
+     * —— 主屏当场丢掉自己的焦点窗口。机主的软键盘被 IMMS 收起、投递到主屏的按键事件
+     * 开始超时(那就是「应用未响应」),是同一件事的两个后果。
+     *
+     * 关键在于这一切都发生在「副屏出现新窗口」的那一瞬间,且不可逆:实测焦点推得回去,
+     * 已经收起的键盘推不回来。所以只能不在那个瞬间和机主撞上。
+     *
+     * 上限存在,是因为机主可能开着键盘就走开了。无限等下去等于任务永远做不完,
+     * 不如等够了就做,并把让了多久如实写进这一步的结果里 —— 让不让、让多久,
+     * 是应该被看见的行为,不是应该被藏起来的实现细节。
+     */
+    fun yieldWhileOwnerTypes(svc: AccessibilityService, timeoutMs: Long = 60_000): Long {
+        if (!ownerTyping(svc)) return 0
+        val t0 = SystemClock.uptimeMillis()
+        while (ownerTyping(svc) && SystemClock.uptimeMillis() - t0 < timeoutMs) Thread.sleep(250)
+        val waited = SystemClock.uptimeMillis() - t0
+        Log.i("WPConflict", "机主在打字,让了 $waited 毫秒")
+        return waited
+    }
 
     /** 用户那块屏永远是 0 —— 主显示器的 id 由系统固定 */
     const val USER_DISPLAY = 0

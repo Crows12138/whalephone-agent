@@ -621,3 +621,101 @@ ANR 是弹在机主脸上的模态对话框,比键盘被收起严重得多,所�
 根子还是那条:副屏拿不到独立的 display group(`displayGroupId 0`),
 窗口焦点是整组共享的。这台机器上没有绕过去的办法 —— 除非不往副屏启新 App,
 而那等于不干活。**这条没解决,写在这里。**
+
+## 推翻上面那条:根子不是 display group,是**焦点**
+
+上一节结尾我写的是「根子还是副屏拿不到独立的 display group」。那是错的,而且错得
+有代表性:我把一个**相关**的读数当成了原因,因为它看上去正好能解释现象。
+
+### 先按那条思路走到了尽头
+
+Android 14 起独立的显示器组由**虚拟设备**提供,而且 `VirtualDevice` 还带着
+`setDisplayImePolicy(displayId, policy)` —— 看起来正好对症。这条路走通了:
+
+- shell(uid 2000)持有 `CREATE_VIRTUAL_DEVICE`(`granted=true, GRANTED_BY_ROLE`)
+- 缺的是 CDM 关联,`cmd companiondevice associate 0 com.android.shell <mac>
+  android.app.role.COMPANION_DEVICE_APP_STREAMING true` 能自己造一个
+- 走 `VirtualDeviceManager` 包装类会报 `No association with ID N` —— 它取的是底层
+  ContextImpl 的 AttributionSource,包名是 `android` 而不是 `com.android.shell`。
+  直接调 `IVirtualDeviceManager` 的 AIDL、自己显式传 AttributionSource 就成了
+  (两个 listener 不能传 null,用动态代理给个空实现)
+- `createVirtualDisplay` 的 flags 传 0 时 `setDisplayImePolicy` 报
+  `Attempted to set IME policy to an untrusted virtual display`;补上 `TRUSTED` 就成功了
+
+结果:虚拟设备建成,`FLAG_OWN_DISPLAY_GROUP` 这次**真的挂在** DisplayDeviceInfo 上了
+(老路 `DisplayManager.createVirtualDisplay` 传这个位会被静默丢掉),
+`setDisplayImePolicy(7, HIDE)` 也接受了。**但 `displayGroupId` 仍然是 0。**
+
+### 然后 AOSP 源码说这条路本来就走不通
+
+`InputMethodManagerService` 每个用户只维持**一份** IME 绑定:
+
+- `DISPLAY_IME_POLICY_HIDE` 的分支里直接调 `hideCurrentInputLocked(...)` ——
+  拿它当实验组等于自己给自己下毒,它不是「别在副屏显示输入法」,是「把当前输入法收起来」
+- 虚拟设备自带输入法(`VirtualDeviceParams.Builder.setInputMethodComponent`,这台
+  ROM 上有)走的是 `setInputMethodLocked(deviceMethodId, ...)`,那是**换绑**,
+  机主那个 IME 一样要被解绑
+
+所以 IME 层不存在「两块屏各自一个键盘」这回事。**问题根本不在 IME 层。**
+
+### 决定性的一次测量:密闭试验台
+
+`scripts/tests/test-focus-rig.sh`。用两块虚拟屏当替身,全程不碰机主的主屏
+(那天机主在通话,`dumpsys power` 里有 `PROXIMITY_SCREEN_OFF_WAKE_LOCK
+'wechat:screen multi-talk'`,屏幕是贴脸灭的 —— 顺带一提,那会儿截图全黑、
+`mInputShown=false`,和 agent 一点关系都没有;不先看一眼手机在干什么,
+这两个读数能骗人很久)。
+
+只做一件事:建一块副屏,什么都不启动,然后读主屏自己的焦点窗口。
+
+| | 主屏焦点窗口 | 顶层焦点屏 |
+|---|---|---|
+| 基线 | `ginlemon.flower.HomeScreen` | 0 |
+| 建了一块副屏之后 | **null** | 9 |
+| 释放之后 | `ginlemon.flower.HomeScreen` | 0 |
+
+三星会自动往「受信 + 带系统装饰」的虚拟屏上放一个 DeX 桌面,那就是一个可获焦窗口。
+**副屏上只要有一个可获焦窗口,主屏当场丢掉自己的焦点窗口。**
+
+### 机制
+
+`DisplayContent.findFocusedWindowIfNeeded(topFocusedDisplayId)`:
+
+```java
+return (hasOwnFocus() || topFocusedDisplayId == INVALID_DISPLAY)
+        ? findFocusedWindow() : null;
+```
+
+`RootWindowContainer.updateFocusedWindowLocked` 从子节点列表的末端往前遍历显示器,
+`topFocusedDisplayId` 边遍历边定;新建的显示器排在主屏前面,先被遍历到,于是它先
+把 `topFocusedDisplayId` 占下。轮到主屏时 `topFocusedDisplayId` 已经不是 INVALID 了,
+而主屏 `hasOwnFocus()` 是 false —— `OWN_FOCUS` 是**造屏时的 flag**,主屏是内置屏,
+加不上。于是主屏返回 null。
+
+主屏没有焦点窗口,直接导致两件事:
+
+1. IMMS 收起机主的软键盘
+2. 投递到主屏的按键事件没有收件人,5 秒后超时 →
+   `Input dispatching timed out (Application does not have a focused window)`
+
+**「应用未响应」和「输入法被收起」是同一个原因的两个后果。** 之前我把它们当成两件事
+分别在修,所以两边都只修到表象。
+
+唯一的全局开关是 `config_perDisplayFocusEnabled`(它会让每块屏都保留自己的焦点),
+那是编译进 framework 的资源,没有运行时入口,`wm` / `cmd window` 里也没有。
+
+### 由此改掉的设计
+
+事后补救整个删掉,换成事前避让:
+
+- 删掉 `Privileged.handBackFocus` 和冷启动期间那条每 250 毫秒钉一次焦点的线程。
+  那条线程等于每 250 毫秒给机主的前台 App 递一颗 ANR 定时炸弹
+- 新增 `Conflict.ownerTyping()`:判据是**机主那块屏上有没有 `TYPE_INPUT_METHOD`
+  窗口**,走无障碍的窗口列表,自带显示器维度,不需要 shell 往返
+- `Agent.execute()` 里每个动作前过一道 `yieldWhileOwnerTypes()`。不按动作分类,
+  因为「会不会引发副屏窗口切换」不是按动作分的:点一下可能跳页,写文本可能弹搜索
+  建议,启动一定会
+- 让了多久会写进那一步的结果里,模型和机主都看得见
+
+代价说清楚:机主打字期间 agent 停工。这是主动选的 —— 题目要求里「不打扰」是硬的,
+吞吐不是。等待有 60 秒上限,防止机主开着键盘走开导致任务永远做不完。

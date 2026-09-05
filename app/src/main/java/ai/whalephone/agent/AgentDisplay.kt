@@ -83,8 +83,9 @@ class AgentDisplay private constructor(
             val (id, flags) = Privileged.createAgentDisplayBestEffort(w, h, dpi, reader.surface)
             if (id < 0) { reader.close(); Log.e(TAG, "造屏失败"); return null }
             val d = AgentDisplay(id, flags, reader)
-            // 造屏这一下会抢走焦点并收起用户的输入法,立刻还回去
-            Privileged.handBackFocus()
+            // 造屏这一下也会把顶层焦点屏切到副屏上(三星会自动往带系统装饰的受信屏上
+            // 放一个 DeX 桌面,那就是一个可获焦窗口)。以前这里补一句「还焦点」,
+            // 现在改成造屏之前先确认机主没在打字 —— 见 AgentService 的调用点。
             Log.i(TAG, "agent 屏 id=$id ${w}x$h@$dpi  保证: ${d.guarantees()}")
             return d
         }

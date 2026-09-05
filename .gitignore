@@ -19,6 +19,6 @@ app/build/
 build/
 local.properties
 probe/classes.dex
-probe/out/
+probe/out*/
 shots/
 tools/

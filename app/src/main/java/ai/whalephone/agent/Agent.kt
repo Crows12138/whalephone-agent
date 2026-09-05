@@ -110,7 +110,19 @@ class Agent(
         return Outcome(false, "走满 $maxSteps 步还没完成", trace)
     }
 
-    private fun execute(name: String, a: JSONObject): String = when (name) {
+    private fun execute(name: String, a: JSONObject): String {
+        // 机主在打字就先让路。放在这里而不是各个动作里,是因为「会不会引发副屏窗口切换」
+        // 不是按动作分的:点一下可能跳页,写文本可能弹搜索建议,启动一定会。
+        // 与其逐个判断,不如所有动作都走同一道门。
+        val waited = hands.yieldToOwner()
+        val r = doExecute(name, a)
+        Thread.sleep(600)   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
+        // 让路要让模型和机主都看得见:模型据此知道这一步为什么慢,
+        // 通知里也能显示 agent 主动避让过 —— 这正是「不打扰」这件事的证据。
+        return if (waited >= 1000) "$r(机主当时在打字,先让了 ${waited / 1000} 秒)" else r
+    }
+
+    private fun doExecute(name: String, a: JSONObject): String = when (name) {
         "click"      -> hands.click(a.getInt("index"))
         "long_click" -> hands.longClick(a.getInt("index"))
         "set_text"   -> hands.setText(a.getInt("index"), a.optString("text"))
@@ -130,15 +142,6 @@ class Agent(
         "home"       -> hands.home()
         "wait"       -> { Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下" }
         else         -> "不认识的动作 $name"
-    }.also {
-        Thread.sleep(600)   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
-        // 兜底:每一步收尾都把全局焦点还给机主。
-        //
-        // 单靠「哪个动作会抢焦点就在哪里还」是不够的 —— 焦点不只被我们的动作抢走,
-        // 副屏上任何一个新窗口冒出来(页面跳转、弹窗、App 冷启动完成)都会留住它,
-        // 而那些时刻不在我们的调用点上。实测机主真手指打字时,只修调用点仍会被打断。
-        // 这里每步一次,相对于一步好几秒的耗时可以忽略。
-        Privileged.handBackFocus()
     }
 
     private fun record(n: Int, thought: String, action: String, result: String) {

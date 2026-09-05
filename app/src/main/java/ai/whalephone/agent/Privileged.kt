@@ -112,25 +112,4 @@ object Privileged {
      * 他自己的输入框,而且会顺手把指针拽回来。实测 agent 连点 5 下之后用户接着
      * 打字,一个字都没丢。)
      */
-    /**
-     * 还焦点这件事本身有代价:它靠的是往主屏注入一个空按键,而**那也是一个输入事件**。
-     * 焦点不在主屏时,这个事件送不进主屏那个没有聚焦窗口的 app,派发超时 5 秒就是
-     * 「Input dispatching timed out」ANR —— 实测 Edge 就是这么被我自己搞挂的。
-     * 对照实验(主屏 Edge 聚焦,同一个淘宝任务):
-     *
-     *   |            | ANR | 输入法被收起 | 结束时 |
-     *   |------------|-----|--------------|--------|
-     *   | 还焦点     |  1  |      1       | 键盘还在 |
-     *   | 不还焦点   |  0  |      2       | 键盘已收起 |
-     *
-     * ANR 是弹在机主脸上的模态对话框,比键盘被收起严重得多,所以默认不还。
-     * 而且「还」本来也救不回键盘 —— 实测 keyevent 0 只推得回焦点指针,
-     * 推不回已经收起的软键盘。这个机制从根上就不解决它要解决的问题。
-     */
-    @Volatile var handBackEnabled = false
-
-    fun handBackFocus() {
-        if (!handBackEnabled) return
-        exec("input -d ${Conflict.USER_DISPLAY} keyevent 0")
-    }
 }
