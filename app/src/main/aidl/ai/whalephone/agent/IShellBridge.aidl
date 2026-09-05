@@ -24,4 +24,14 @@ interface IShellBridge {
     int createDisplay(int w, int h, int dpi, in Surface surface, int flags) = 2;
 
     void releaseDisplay(int displayId) = 3;
+
+    /**
+     * 这块屏还在吗。
+     *
+     * 必须由属主来答:副屏带 FLAG_PRIVATE,只有创建它的进程(shell)看得见。
+     * app 侧拿自己的 DisplayManager 去 getDisplay(id) 永远返回 null ——
+     * 那不是「屏没了」,是「你没资格看见它」。两者读数一样,后果差很远:
+     * 前者该重造,后者重造就是白白多抢一次焦点、多收一次机主的键盘。
+     */
+    boolean displayAlive(int displayId) = 5;
 }

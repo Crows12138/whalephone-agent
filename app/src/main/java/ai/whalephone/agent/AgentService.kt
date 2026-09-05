@@ -75,7 +75,11 @@ class AgentService : Service() {
             // 继续跑,`am start --display N` 报的是 Permission Denial,看着像权限问题,
             // 其实是对象已经不在了。复用之前先问系统这块屏还在不在。
             shared?.let { old ->
-                if (getSystemService(DisplayManager::class.java)?.getDisplay(old.displayId) == null) {
+                // 必须问桥,不能问自己的 DisplayManager:副屏带 FLAG_PRIVATE,属主是 shell,
+                // app 进程 getDisplay(id) 永远返回 null。原来就是这么判的,于是「跨任务
+                // 复用副屏」这条设计在真机上一次都没生效过 —— 每个任务都重造一块,
+                // 而造屏正是全流程里唯一必须避让机主的动作,本该一辈子一次。
+                if (!Privileged.displayAlive(old.displayId)) {
                     Log.w(TAG, "副屏 ${old.displayId} 已经不存在了(特权桥重启过?),重造一块")
                     runCatching { old.release() }
                     shared = null

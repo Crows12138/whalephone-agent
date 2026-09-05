@@ -78,6 +78,16 @@ class ShellBridge : IShellBridge.Stub {
     }
 
     /**
+     * 这块屏还在吗。两个条件都要:我们手上还握着它,而且系统里也还认它。
+     * 只看前者会在系统单方面回收之后仍然报活;只看后者会漏掉别人造的屏,
+     * 而那种屏不归我们复用。
+     */
+    override fun displayAlive(displayId: Int): Boolean = runCatching {
+        val held = synchronized(displays) { displays[displayId] } ?: return false
+        held.display?.isValid == true && displayManager().getDisplay(displayId) != null
+    }.getOrDefault(false)
+
+    /**
      * DisplayManagerService 会拿客户端报上来的包名反查 uid 做校验。系统 Context 的
      * 包名是 "android"(uid 1000),而我们这个进程是 shell(uid 2000),对不上就直接
      * SecurityException: packageName must match the owner uid。实测踩过。

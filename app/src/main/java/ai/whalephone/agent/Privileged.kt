@@ -47,7 +47,9 @@ object Privileged {
             .daemon(false)
             .processNameSuffix("bridge")
             .debuggable(false)
-            .version(1)
+            // AIDL 一改就要升版本号,否则 Shizuku 会复用旧的 user service 进程 ——
+            // 那个进程里没有新方法,调用会直接抛。
+            .version(2)
 
         Shizuku.bindUserService(args, object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -117,6 +119,10 @@ object Privileged {
         val v = out.substringAfter("mCurrentFocus=").trim()
         return if (v == "null") "" else v
     }
+
+    /** 这块副屏还在吗。问属主 —— app 自己看不见私有虚拟屏,见 AIDL 里的说明。 */
+    fun displayAlive(displayId: Int): Boolean =
+        runCatching { bridge?.displayAlive(displayId) == true }.getOrDefault(false)
 
     fun createAgentDisplay(w: Int, h: Int, dpi: Int, surface: Surface): Int =
         bridge?.createDisplay(w, h, dpi, surface, ShellBridge.AGENT_DISPLAY_FLAGS) ?: -1
