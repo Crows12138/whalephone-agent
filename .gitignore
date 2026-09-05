@@ -4,12 +4,15 @@
 # 运行期临时文件
 .backup/
 .build.log
+.build.log
 .cap.mp4
 .did
 .f.log
 .gradle/
 .hold.log
 .scratch/
+.sdkimg.log
+.sdkinstall.log
 .see.log
 .snap.mkv
 .vd*.mkv
@@ -22,3 +25,4 @@ probe/classes.dex
 probe/out*/
 shots/
 tools/
+wptoolsandroid-sdk/
