@@ -190,6 +190,10 @@ class AgentService : Service() {
         // 一个字都不留 —— 只有正常跑完那条路径打了「结束 done=」。
         // 出问题时看到的就是「agent 没反应」,查不到它为什么没干活。收尾在这里统一记一次。
         Log.i(TAG, "收工: $msg")
+        // 副屏留着复用,它上面的窗口会一直占着全局焦点,主屏就没有获焦窗口了 ——
+        // 机主下一次按键正好落在「Application does not have a focused window」上。
+        // 只在这里推一次,而且只在主屏确实没焦点时推。
+        runCatching { Log.i(TAG, Privileged.handBackFocusAtFinish()) }
         // 权限跟着任务走:干完就把无障碍关掉,机主那边才付得了款。
         // 副屏不一样,它留着 —— 关权限是为了消除一个对机主可见的副作用,
         // 留副屏是为了少一次对机主可见的抖动,两件事都朝同一个方向。
