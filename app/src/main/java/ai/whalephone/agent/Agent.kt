@@ -107,6 +107,14 @@ class Agent(
             trace.takeLast(8).forEach { appendLine("  ${it.n}. ${it.action} -> ${it.result}") }
             appendLine()
         }
+        // 卡死检测靠的是「快照连续几帧一样」,但模型可以一直点不同的元素、
+        // 让界面每帧都有点变化,却始终没往目标推进 —— 那种循环检测不到。
+        // 连续三次同一个动作就直接把这件事摊开说,比让它自己从历史里看出来可靠。
+        val last3 = trace.takeLast(3)
+        if (last3.size == 3 && last3.map { it.action }.distinct().size == 1) {
+            appendLine("注意:你已经连续三步都在 ${last3[0].action},显然没有推进。换一个动作。")
+            appendLine()
+        }
         appendLine("这是副屏第 $n 步的界面:")
         append(render)
     }
@@ -141,7 +149,7 @@ class Agent(
             可用动作:
               click       index
               long_click  index
-              set_text    index, text
+              set_text    index, text(自带聚焦并覆盖原内容,不用先点它、也不用先清空)
               scroll      index, direction("forward" 往下 / "backward" 往上)
               launch      package(应用包名)
               back        (无参数,只在副屏上返回)
@@ -155,6 +163,7 @@ class Agent(
             - 你没有键盘,文字一律用 set_text 写进输入框。
             - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
             - 界面连着几步没变,说明你的做法不起作用,换一个,别原地重复。
+            - 想往输入框里写字就直接 set_text。反复点同一个元素等它「变成输入状态」是没用的。
             - 副屏上可能还停着上一个任务留下的界面。不确定自己在哪就先 home,再 launch。
             - 目标达成就立刻 done,不要多点。
         """.trimIndent()

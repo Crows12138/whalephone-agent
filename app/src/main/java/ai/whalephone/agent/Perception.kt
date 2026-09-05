@@ -74,6 +74,10 @@ object Perception {
         val out = mutableListOf<Raw>()
         val pkgs = LinkedHashSet<String>()
         windows.orEmpty().forEach { w ->
+            // 状态栏和导航栏(TYPE_SYSTEM)不进快照:它们带进来的是时间、信号格、
+            // 电量百分比这类每帧都在变的噪声,既费 token 又会干扰判断 —— 实测模型
+            // 因此说过「顶部混入了系统栏」而多走一步。agent 要操作的永远是应用窗口。
+            if (w.type == AccessibilityWindowInfo.TYPE_SYSTEM) return@forEach
             val root = w.root ?: return@forEach
             root.packageName?.toString()?.let { pkgs += it }
             walk(root, out, HashSet())
