@@ -50,6 +50,7 @@ class EyesAndHands : AccessibilityService() {
                     // 想清掉一个配置只能靠「缺席」表达。
                     val v = i.getStringExtra("value")
                     if (k == "TRACE_EVENTS") trace = (v == "1")
+                    if (k == "NO_HANDBACK") Privileged.handBackEnabled = (v != "1")
                     if (k.isNotBlank()) {
                         if (v == null) {
                             Config.remove(this@EyesAndHands, k)

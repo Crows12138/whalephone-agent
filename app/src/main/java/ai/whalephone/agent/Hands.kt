@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
+import kotlin.concurrent.thread
 
 /**
  * agent 在副屏上的一双手。所有对外的操作都必须从这里走,因为
@@ -326,18 +327,34 @@ class Hands(
         //     「Input dispatching timed out (Application does not have a focused window)」ANR
         // 淘宝这类 App 冷启动要好几秒,所以不能只在启动前后各还一次焦点 ——
         // 整个轮询期间每一轮都要把焦点推回去,把敞口压到最小。
+        // 冷启动期间开一条线程,高频把焦点钉回主屏。
+        //
+        // ANR 的判据是「输入派发超时 5 秒」。注入类动作还焦点只要一个 shell 往返,
+        // 够不上 5 秒;能撑到的只有这里 —— App 冷启动要好几秒,期间副屏的窗口
+        // 反复抢焦点,和我们拉锯。放在轮询循环里还不够快:中间还夹着一次快照遍历,
+        // 实际间隔能到一两秒,焦点大部分时间仍在副屏,机主这时碰屏就 ANR。
+        val pin = thread(name = "wp-pin-focus") {
+            runCatching {
+                while (!Thread.currentThread().isInterrupted) {
+                    Privileged.handBackFocus()
+                    Thread.sleep(FOCUS_PIN_MS)
+                }
+            }
+        }
+        try {
         val deadline = System.currentTimeMillis() + LAUNCH_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(700)
-            Privileged.handBackFocus()
             val s = snapshot()
             if (s.packages.any { it == pkg }) {
-                // App 的窗口这时才真的出现,焦点也是这时被抢走的
-                Privileged.handBackFocus()
                 return "已在副屏打开 $pkg,当前 ${s.elements.size} 个可交互元素"
             }
         }
         return "启动 $pkg 后等了 ${LAUNCH_TIMEOUT_MS / 1000} 秒界面还没出来,可能是启动慢或者被系统拦了"
+        } finally {
+            pin.interrupt()
+            Privileged.handBackFocus()   // 收尾再钉一次,确保停在主屏
+        }
     }
 
     companion object {
@@ -345,6 +362,8 @@ class Hands(
         private const val LAUNCH_TIMEOUT_MS = 25_000L
         /** 动作之后等界面反应的时间。太短会把「慢」误判成「没生效」。 */
         private const val SETTLE_MS = 500L
+        /** 冷启动期间把焦点钉回主屏的间隔。够密才能压过副屏窗口的抢占。 */
+        private const val FOCUS_PIN_MS = 250L
 
         /**
          * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是
