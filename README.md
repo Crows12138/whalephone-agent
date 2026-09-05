@@ -41,9 +41,10 @@ task 归属、副屏销毁。最难的是焦点,结论实测出来的:副屏上�
 
 1. 装 [Shizuku](https://shizuku.rikka.app/),按它的引导用**无线调试**启动(Android 11+)
 2. 装本项目 APK,打开后点「授权 Shizuku」
-3. 点「打开无障碍设置」启用 WhalePhone
-   (Android 13+ 会拦侧载应用,需在应用信息页菜单里选「允许受限设置」)
-4. 填下面的配置项,写任务,点「在副屏上开始」
+3. 填下面的配置项,写任务,点「在副屏上开始」
+
+无障碍权限不用手动开:开跑前自己打开、收工后自己关掉,机主那边就不会有一个常开的
+无障碍服务(微信收银台见到它会拒绝付款)。只动自己那一项,机主原有的读屏服务不受影响。
 
 从源码构建 `./gradlew assembleDebug`,产物在 `app/build/outputs/apk/debug/`。Windows 上
 项目路径含非 ASCII 字符时 AGP 会拒绝构建,用 `mklink /J C:\wp <路径>` 对着联接构建。
@@ -58,6 +59,7 @@ task 归属、副屏销毁。最难的是焦点,结论实测出来的:副屏上�
 | `LLM_API_KEY` | 接口密钥 | 无,必填 |
 | `LLM_MODEL` | 模型名 | `deepseek-chat` |
 | `DEMO_FEED` | 设为 `1` 则任务期间把副屏画面写成 PNG,供录像取景窗使用 | 关 |
+| `A11Y_AUTO` | 设为 `0` 则不自动开关无障碍权限,由机主自己管 | 开 |
 
 DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_url 和 model 即可。
 

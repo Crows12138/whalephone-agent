@@ -47,6 +47,11 @@ class AgentService : Service() {
     }
 
     private fun runTask(goal: String) {
+        // 顺序是有讲究的:先连特权桥,再用它去开无障碍。
+        // 无障碍这个 setting 只有 shell 身份写得动,而桥就是那个身份 ——
+        // 反过来先要无障碍就成了死锁:权限关着的时候,连「谁来开它」都不在了。
+        Privileged.connect(this)
+        if (!A11yGate.open(this)) Log.i(TAG, "没能自动打开无障碍,按机主自己的设置来")
         val probe = EyesAndHands.instance
         if (probe == null) { finish("无障碍服务没开,agent 没有眼睛"); return }
         val llm = Config.llm(this) ?: run { finish("没配 LLM_API_KEY"); return }
@@ -173,12 +178,22 @@ class AgentService : Service() {
     private fun stop() {
         stopping = true
         worker?.interrupt()
+        // 机主明确点了停止,长时任务也已经被 Watch.clear 清掉,权限没有留着的理由
+        runCatching { A11yGate.close(this) }
         shared?.release(); shared = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun finish(msg: String) {
+        // 所有提前收尾的理由(机主一直在打字、副屏没造成、没有眼睛)原先在日志里
+        // 一个字都不留 —— 只有正常跑完那条路径打了「结束 done=」。
+        // 出问题时看到的就是「agent 没反应」,查不到它为什么没干活。收尾在这里统一记一次。
+        Log.i(TAG, "收工: $msg")
+        // 权限跟着任务走:干完就把无障碍关掉,机主那边才付得了款。
+        // 副屏不一样,它留着 —— 关权限是为了消除一个对机主可见的副作用,
+        // 留副屏是为了少一次对机主可见的抖动,两件事都朝同一个方向。
+        runCatching { A11yGate.close(this) }
         // 一次性任务结束也留着副屏:用户很可能接着下一个任务,重造一次就多抖一次。
         // 真正销毁只发生在用户点「停止」,或者服务被系统回收。
         update("任务结束", msg, ongoing = false)
@@ -271,11 +286,12 @@ class AgentService : Service() {
         private const val CH_ASK = "agent_ask"
         private const val NOTI_ID = 1
         private const val NOTI_ASK = 2
-
         /** 造副屏之前最多等机主多久。比单步等待长得多:造屏一个任务只发生一次,
          *  多等一会儿换「一次都不打断」是划算的。 */
         const val DISPLAY_WAIT_MS = 180_000L
         const val ACT_STOP = "ai.whalephone.agent.STOP"
+        /** 清单里静态注册的入口用的动作,见 CommandReceiver */
+        const val ACT_RUN_EXTERNAL = "ai.whalephone.agent.RUN"
         const val EXTRA_GOAL = "goal"
         const val KEY_DEV_DISPLAY = "DEV_DISPLAY_ID"
         const val KEY_DEMO_FEED = "DEMO_FEED"

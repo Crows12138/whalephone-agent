@@ -44,6 +44,19 @@
             </intent-filter>
         </activity>
 
+        <!--
+          任务入口必须活在无障碍服务之外:权限跟着任务走(A11yGate),不跑任务时
+          无障碍是关的,注册在它里面的接收器也就不在了。
+          Android 8 起静态接收器收不到隐式广播,所以发广播时要带 -p 包名。
+        -->
+        <receiver
+            android:name=".CommandReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="ai.whalephone.agent.RUN" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".AgentService"
             android:exported="false"
