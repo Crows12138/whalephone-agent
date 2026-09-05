@@ -70,6 +70,12 @@ class EyesAndHands : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
+        imePkg = runCatching {
+            android.provider.Settings.Secure.getString(
+                contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD)
+                ?.substringBefore('/')
+        }.getOrNull()
+        Log.i(TAG, "机主的输入法: $imePkg")
         Log.i(TAG, "=== 无障碍服务已连接 ===")
         registerReceiver(
             receiver,
@@ -111,12 +117,35 @@ class EyesAndHands : AccessibilityService() {
     @Volatile var ownerWindowsChangedAt = 0L
         private set
 
+    /**
+     * 机主那块屏上,输入法自己的窗口最近几次动静的时刻(环形缓冲,只留最近 16 次)。
+     *
+     * 为什么需要这条:微信这类 App 把无障碍内容挡掉了 —— 窗口看得见,树是空的,
+     * 读不到机主正在编辑的输入框。而那正是机主最常打字的地方。输入法是**另一个进程**,
+     * 它的窗口照样报事件:每敲一下,候选栏、按键预览都在变。实测敲 3 下 = 23 条事件,
+     * 键盘弹着不打字 30 秒 = 2 条。两个数量级的差,够用来判「有没有人在敲」。
+     *
+     * 只认输入法这个包,不认整块屏:整块屏上时钟、通知也会发事件。
+     */
+    private val imeEvt = LongArray(16)
+    private var imeEvtIdx = 0
+
+    /** 当前输入法的包名。机主中途换输入法的话这条信号会哑掉 —— 哑掉就退回保守行为。 */
+    private var imePkg: String? = null
+
+    /** [since] 之后,输入法窗口动过几次 */
+    fun ownerImeEventsSince(since: Long): Int =
+        synchronized(imeEvt) { imeEvt.count { it > since } }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
         // 这个回调跑在主线程上,而且滚动一个信息流就是成百上千次。
         // 这里做的任何事都得是常数级的 —— 原来每次都读一遍 SharedPreferences,
         // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
-        if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${AccessibilityEvent.eventTypeToString(e.eventType)}")
+        if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${e.packageName} " +
+            AccessibilityEvent.eventTypeToString(e.eventType))
+        if (e.displayId == Conflict.USER_DISPLAY && e.packageName?.toString() == imePkg)
+            synchronized(imeEvt) { imeEvt[imeEvtIdx++ % imeEvt.size] = SystemClock.uptimeMillis() }
         // 机主那块屏上窗口结构变过 —— 让路判据拿它当「机主动过」的第二个检测器
         // (第一个是输入框指纹)。为什么需要两个,见 Conflict.ownerStillAtIt。
         if (e.displayId == Conflict.USER_DISPLAY &&

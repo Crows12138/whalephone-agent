@@ -103,6 +103,7 @@ shell 侧的动作:
     bash scripts/restore-a11y.sh                 # 还原无障碍设置
     adb uninstall ai.whalephone.agent
     adb shell settings put global stay_on_while_plugged_in 0
+    adb shell settings put system accelerometer_rotation 1   # 测试期间锁了竖屏
     bash scripts/vd2.sh stop
 
 ## 踩过的坑

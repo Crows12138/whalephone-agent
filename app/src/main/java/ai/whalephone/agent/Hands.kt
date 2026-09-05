@@ -463,24 +463,40 @@ object Conflict {
      */
     private fun ownerStillAtIt(svc: AccessibilityService): Boolean {
         val now = SystemClock.uptimeMillis()
+        var active = false
+
+        // 检测器一:输入法自己的窗口在动。
+        //
+        // 这条最通用 —— 输入法是另一个进程,前台 App 挡不挡无障碍都影响不到它,
+        // 而每敲一下候选栏、按键预览都在变。实测敲 3 下 23 条事件,键盘弹着不打字
+        // 30 秒 2 条,两个数量级。微信这类把内容挡掉的 App 只剩这一条能用,
+        // 而那恰恰是机主最常打字的地方,所以它不是兜底,是主力,每次都查。
+        val busy = EyesAndHands.instance?.ownerImeEventsSince(now - 5_000) ?: 0
+        if (busy >= IME_BUSY) { imeArmed = true; active = true; nIme++ }
+
+        // 检测器二:机主的输入框内容或光标变了。比检测器一精确,但要 App 肯给。
         val fp = ownerEditorFingerprint(svc)
-        if (fp == null) {                       // 读不到 —— 退回只看窗口状态
-            fpReadable = false; fpLast = null; nBlind++; return true
+        if (fp == null) {
+            if (fpReadable) fpChangedAt = now   // 刚从「读得到」切成「读不到」,重新计时
+            fpReadable = false; fpLast = null; nBlind++
+        } else {
+            fpReadable = true
+            if (fp != fpLast) { fpLast = fp; active = true; nFp++ }
         }
-        fpReadable = true
-        if (fp != fpLast) {                     // 指纹变了 = 刚有键落下
-            fpLast = fp; fpChangedAt = now; idleLogged = false; nFp++; return true
-        }
+
+        if (active) { fpChangedAt = now; idleLogged = false; return true }
+
+        // 两条都没证明过自己在这台机器上能用,就退回原来的行为:一律按「在打字」算。
+        if (!signalArmed()) return true
         if (fpChangedAt == 0L) { fpChangedAt = now; return true }
-        // 第二个检测器:机主那块屏上的**窗口结构**变过。
+
+        // 检测器三:机主那块屏上的**窗口结构**变过。
         //
-        // 光看指纹漏掉一种情况,而且是真机上撞出来的:上一轮让路结束时输入框是空的,
-        // 机主收起键盘、又重新点进同一个空输入框 —— 指纹一模一样,判据当场判他
-        // 「早就停手了」,一秒没让。他确实动了,只是动作没落在文本上。
-        //
-        // 键盘弹起、对话框出现、切 App,都会让无障碍报一次 TYPE_WINDOWS_CHANGED,
-        // 而这些都是机主在操作。这条信号由框架发出,不靠 App 配合 —— 和文本变化
-        // 事件不一样(Edge 地址栏就一条都不发)。机主真走开时主屏是静的,不会误触发。
+        // 补的是「重新点进同一个空输入框」这种:指纹一模一样,人却确实动了。
+        // 真机上撞到过 —— 上一轮让路结束时输入框是空的,机主收起键盘又点回去,
+        // 判据当场判他「早就停手了」,一秒没让。
+        // 键盘弹起、对话框出现、切 App 都会报 TYPE_WINDOWS_CHANGED,由框架发出,
+        // 不靠 App 配合。会不会太吵?实测主屏静置 30 秒一条事件都没有。
         val winAt = EyesAndHands.instance?.ownerWindowsChangedAt ?: 0L
         if (winAt > fpChangedAt) {
             fpChangedAt = winAt; idleLogged = false; nWin++; return true
@@ -489,7 +505,7 @@ object Conflict {
         if (idle < idleMs(svc)) return true
         if (!idleLogged) {
             idleLogged = true
-            Log.i("WPConflict", "键盘还开着,但输入框 ${idle / 1000} 秒没动过 —— 按机主已经停手算")
+            Log.i("WPConflict", "键盘还开着,但 ${idle / 1000} 秒没人动过 —— 按机主已经停手算")
         }
         return false
     }
@@ -512,19 +528,31 @@ object Conflict {
         for (w in wins) {
             if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
             val node = w.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: continue
+            // 有节点、但既没有文本也没有选区 = 这个 App 把内容挡掉了,节点在那儿也问不出
+            // 东西。微信的搜索框就是这样:屏幕上明明写着「行行行」,节点报 text=null、
+            // 选区 -1。**这种情况必须当成读不到**,不能当成「输入框没变」——
+            // 后者会让判据在机主正打字时判他停手,那正是这个项目最不能出的错。
+            if (node.text == null && node.textSelectionStart < 0 && node.textSelectionEnd < 0)
+                continue
             return "${node.text}|${node.textSelectionStart}|${node.textSelectionEnd}"
         }
         null
     }.getOrNull()
 
+    /** 五秒内输入法窗口动几次算「有人在敲」。实测:敲一下约 7 条,静置 30 秒共 2 条。 */
+    private const val IME_BUSY = 3
+
     private var fpLast: String? = null
     private var fpChangedAt = 0L
+
+    /** 输入法那条信号在这台机器上证明过自己能用了吗 */
+    @Volatile private var imeArmed = false
 
     /** 上一次判据到底读没读到输入框。读不到时让路上限要退回保守值。 */
     @Volatile private var fpReadable = false
 
-    /** 这台机器上活动信号能不能用。用不了就退回只看状态。 */
-    private fun signalArmed() = fpReadable
+    /** 这台机器上活动信号能不能用(两条任一可用即可)。都用不了就退回只看状态。 */
+    private fun signalArmed() = fpReadable || imeArmed
 
     private fun idleMs(svc: AccessibilityService): Long =
         Config.get(svc, "TYPING_IDLE_MS", "20000").toLongOrNull() ?: 20_000L
@@ -538,13 +566,18 @@ object Conflict {
     private var nFp = 0
     private var nWin = 0
     private var nBlind = 0
+    private var nIme = 0
 
     /** 给 TYPING 探针看的:活动信号这一路此刻是什么状况。只读,不改判据的状态。 */
     fun activityStatus(svc: AccessibilityService): String {
+        val now = SystemClock.uptimeMillis()
+        val busy = EyesAndHands.instance?.ownerImeEventsSince(now - 5_000) ?: 0
         val fp = ownerEditorFingerprint(svc)
-            ?: return "读不到机主的输入框 —— 空闲判定不启用,退回只看窗口状态"
-        val idle = if (fpChangedAt == 0L) -1 else (SystemClock.uptimeMillis() - fpChangedAt) / 1000
-        return "输入框可读(${fp.take(40)}),距上次变化 ${if (idle < 0) "还没测过" else "$idle 秒"}"
+        val idle = if (fpChangedAt == 0L) "还没测过" else "${(now - fpChangedAt) / 1000} 秒"
+        return "输入法窗口近 5 秒动了 $busy 次" +
+            (if (imeArmed) "" else "(这条还没证明可用)") +
+            ";输入框" + (fp?.let { "可读(${it.take(40)})" } ?: "读不到") +
+            ";距上次有人动过 $idle"
     }
 
     /** 判据的**状态**那一半:机主那块屏上有没有一个为他而开的输入法窗口。 */
@@ -624,7 +657,7 @@ object Conflict {
      * 是应该被看见的行为,不是应该被藏起来的实现细节。
      */
     fun yieldWhileOwnerTypes(svc: AccessibilityService, timeoutMs: Long = 0): Long {
-        idleLogged = false; nFp = 0; nWin = 0; nBlind = 0; tIme = 0; tFp = 0
+        idleLogged = false; nFp = 0; nWin = 0; nBlind = 0; nIme = 0; tIme = 0; tFp = 0
         if (!ownerTyping(svc)) return 0
         // timeoutMs = 0 表示由这里决定上限,取决于「键落下」这个信号能不能用:
         //   能用 —— 正常出口是机主停手,上限只是信号出意外时的兜底,可以放得很宽,
@@ -656,7 +689,7 @@ object Conflict {
         val slow = if (tSleep > 1_500 || tIme > 500 || tFp > 500)
             ";这一轮被调度拖慢了 看键盘 $tIme/看输入框 $tFp/睡 500 实际 $tSleep 毫秒" else ""
         Log.i("WPConflict", "机主在打字,让了 $waited 毫秒($why;轮询 $polls 次," +
-            "输入框变了 $nFp 次,主屏窗口变了 $nWin 次,读不到输入框 $nBlind 次$slow)")
+            "输入框变了 $nFp 次,主屏窗口变了 $nWin 次,读不到输入框 $nBlind 次(其中输入法在动 $nIme 次)$slow)")
         return waited
     }
 
