@@ -44,22 +44,20 @@ D=$(sh logcat -d -s WPSvc:* | grep -oE "副屏 [0-9]+ 就绪" | grep -oE "[0-9]+
 echo "   副屏 $D 已就绪,会留到下一个任务复用"
 
 echo
-echo "== 第二段:任务跑起来之后,机主才开始打字 =="
+echo "== 第二段:机主先开始打字,然后 agent 收到任务 =="
+# 顺序很重要,而且改过一次。
+#
+# 让路现在只挡 launch(唯一会收键盘的动作,见 FINDINGS 的逐个操作归因表),
+# 别的动作不再等 —— 否则机主一打字 agent 就整个停摆,而这个项目的命题恰恰是
+# 「机主用着手机的同时 agent 也在用」。
+#
+# 于是测试的时序也得跟着变:原来是「等 agent 动起来再叫键盘」,那时第一个 launch
+# 已经过去了,让路一次都不触发,读数全 0 但什么也没测到。现在副屏已经在(第一段
+# 造好的),所以先把键盘叫起来再下任务,第一个 launch 正好撞上让路。
+raise_ime || { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
+echo "   机主的输入法已弹出 mInputShown=true  焦点屏=$(focus)"
 sh logcat -c
 bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
-# 等 agent 真的迈出第一步再叫键盘 —— 早了就又变成事前避让,晚了窗口就短
-for _ in $(seq 1 45); do
-  python -c "import time;time.sleep(2)"
-  sh logcat -d -s WPAgent:* | grep -q "第 1 步" && break
-done
-sh logcat -d -s WPAgent:* | grep -q "第 1 步" || { echo "agent 没动起来,测不了"; exit 1; }
-echo "   agent 已经在干活了,现在把机主的输入法叫出来"
-# 用 Edge 的地址栏,不用本 app 自己的输入框。
-# 焦点被挪到副屏期间,机主前台的 app 一旦收到触摸就会
-# 「Input dispatching timed out」ANR,而 ANR 对话框本身也会带走键盘 ——
-# 拿本 app 当载体,等于用一个会被待测现象弄坏的东西去测那个现象。
-raise_ime || { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
-echo "   输入法已弹出 mInputShown=true  焦点屏=$(focus)"
 
 echo
 echo "== 开始采样(任务已经在跑,键盘已经弹着)=="

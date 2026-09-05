@@ -130,11 +130,22 @@ class Agent(
     /** 上一步是不是「让了路、没动手」。卡死检测要跳过这种步。 */
     private var lastStepYielded = false
 
+    /**
+     * 只有这些动作需要等机主打完字。
+     *
+     * 原来是所有动作都等,理由是「点一下可能跳页,写文本可能弹搜索建议」。
+     * 逐个操作归因表(见 FINDINGS)否掉了这个顾虑:无障碍动作不动焦点也不动键盘;
+     * `input -d N` 的注入和副屏上的页内跳转会挪焦点,但**不收键盘**,而焦点在
+     * 下一轮循环开头就还回主屏了。唯一会收起机主键盘的是往副屏启 App。
+     *
+     * 这个区别不是省几秒的事。全都等 = 机主一打字 agent 就整个停摆 —— 真机上撞到过:
+     * 键盘留在那儿没人管,agent 每轮让满 60 秒,一步都做不了。而这个项目的命题恰恰是
+     * 「机主正用着手机时 agent 同时也在用」。让路应该只挡住真会伤到他的那一下。
+     */
+    private fun needsYield(name: String) = name == "launch"
+
     private fun execute(name: String, a: JSONObject): String {
-        // 机主在打字就先让路。放在这里而不是各个动作里,是因为「会不会引发副屏窗口切换」
-        // 不是按动作分的:点一下可能跳页,写文本可能弹搜索建议,启动一定会。
-        // 与其逐个判断,不如所有动作都走同一道门。
-        val waited = hands.yieldToOwner()
+        val waited = if (needsYield(name)) hands.yieldToOwner() else 0L
         // 等过之后就不能再照着旧决策动手了。
         //
         // 模型这一步的序号和位置,都是在**等待之前**那一帧快照上算出来的。等待期间
