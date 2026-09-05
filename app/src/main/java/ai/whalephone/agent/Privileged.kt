@@ -89,9 +89,37 @@ object Privileged {
         )
         for (f in ladder) {
             val id = bridge?.createDisplay(w, h, dpi, surface, f) ?: -1
-            if (id >= 0) return id to f
+            if (id < 0) continue
+            // 造出来了不等于能用:无障碍看不见这块屏的话,agent 是瞎的。
+            //
+            // 原生 AOSP 的 AccessibilityManagerService 会直接排除**私有**虚拟屏
+            // (isValidDisplay:TYPE_VIRTUAL 且带 FLAG_PRIVATE 就不跟踪),
+            // 而不带 PUBLIC 造出来的屏一定是私有的。三星放宽了这条,所以在机主那台
+            // 手机上一直没暴露 —— 换台原生机器整套东西就是瞎的,而且不会报错,
+            // 只会「什么都读不到」。在模拟器上撞到才发现。
+            //
+            // 所以造完当场问一句无障碍看不看得见,看不见就补上 PUBLIC 重造。
+            // 判据是能力本身,不是我对某个 ROM 的假设。
+            if (a11ySees(id)) return id to f
+            Log.w(TAG, "无障碍看不见副屏 $id(flags=0x${f.toString(16)}),补 PUBLIC 重造")
+            bridge?.releaseDisplay(id)
+            val pub = f or ShellBridge.PUBLIC
+            val id2 = bridge?.createDisplay(w, h, dpi, surface, pub) ?: -1
+            if (id2 >= 0 && a11ySees(id2)) return id2 to pub
+            if (id2 >= 0) bridge?.releaseDisplay(id2)
         }
         return -1 to 0
+    }
+
+    /** 无障碍能不能读到这块屏。造屏之后必须问一次 —— 读不到的话 agent 没有眼睛。 */
+    private fun a11ySees(displayId: Int): Boolean {
+        val svc = EyesAndHands.instance ?: return true   // 服务还没连上,这里判断不了,不拦
+        // 屏刚造出来,窗口管理器和无障碍那边都要几百毫秒才跟上
+        repeat(6) {
+            if (svc.windowsOnAllDisplays.indexOfKey(displayId) >= 0) return true
+            Thread.sleep(250)
+        }
+        return false
     }
 
     fun release(displayId: Int) { runCatching { bridge?.releaseDisplay(displayId) } }

@@ -76,11 +76,21 @@ class AgentService : Service() {
                     shared = null
                 }
             }
-            val d = shared ?: AgentDisplay.create(
-                resources.displayMetrics.widthPixels,
-                resources.displayMetrics.heightPixels,
-                resources.displayMetrics.densityDpi,
-            )?.also { shared = it } ?: run { finish("副屏创建失败"); return }
+            // 造屏这一下本身就会抢焦点:副屏一出现可获焦窗口,主屏就丢掉自己的焦点窗口,
+            // 机主的软键盘当场被 IMMS 收起。实测过 —— 只建一块屏、什么都不启动,就够了。
+            // 所以它和后面每个动作一样,要先等机主打完字。
+            // (漏掉这一处的后果是整套让路白做:动作全让了,开场第一秒还是把人打断。)
+            val d = shared ?: run {
+                EyesAndHands.instance?.let { svc ->
+                    val w = Conflict.yieldWhileOwnerTypes(svc)
+                    if (w > 0) note("机主在打字,等了 ${w / 1000} 秒再造副屏")
+                }
+                AgentDisplay.create(
+                    resources.displayMetrics.widthPixels,
+                    resources.displayMetrics.heightPixels,
+                    resources.displayMetrics.densityDpi,
+                )?.also { shared = it }
+            } ?: run { finish("副屏创建失败"); return }
             displayId = d.displayId
             Log.i(TAG, "副屏 ${d.displayId} 就绪: ${d.guarantees()}")
             note("副屏 ${d.displayId} 就绪 · ${d.guarantees()}")

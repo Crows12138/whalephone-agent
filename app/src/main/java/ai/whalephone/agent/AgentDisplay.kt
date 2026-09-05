@@ -33,7 +33,9 @@ class AgentDisplay private constructor(
     /** 这块屏实际拿到了哪几条保证 —— 降级过的话这里会少 */
     fun guarantees(): String = buildList {
         if (flags and ShellBridge.TRUSTED != 0) add("受信(可启第三方App)")
-        if (flags and ShellBridge.OWN_FOCUS != 0) add("独立焦点(本机实测无可观测效果,保留以备其它 ROM)")
+        // 原生 Android 16 上实测有效:机主的屏和副屏能同时各自持有焦点窗口,
+        // 机主的输入法不受影响。三星那台机器上没观察到同样的效果,原因未查。
+        if (flags and ShellBridge.OWN_FOCUS != 0) add("独立焦点")
         if (flags and ShellBridge.ALWAYS_UNLOCKED != 0) add("锁屏仍可用")
         if (flags and ShellBridge.OWN_CONTENT_ONLY != 0) add("不镜像主屏")
         if (flags and ShellBridge.SHOULD_SHOW_SYSTEM_DECORATIONS != 0) add("有独立系统装饰")
@@ -83,9 +85,9 @@ class AgentDisplay private constructor(
             val (id, flags) = Privileged.createAgentDisplayBestEffort(w, h, dpi, reader.surface)
             if (id < 0) { reader.close(); Log.e(TAG, "造屏失败"); return null }
             val d = AgentDisplay(id, flags, reader)
-            // 造屏这一下也会把顶层焦点屏切到副屏上(三星会自动往带系统装饰的受信屏上
-            // 放一个 DeX 桌面,那就是一个可获焦窗口)。以前这里补一句「还焦点」,
-            // 现在改成造屏之前先确认机主没在打字 —— 见 AgentService 的调用点。
+            // 造屏这一下也会把顶层焦点屏切到副屏上(带系统装饰的受信屏上会自己冒出
+            // 桌面窗口:三星是 DeX 桌面)。避让在调用方 AgentService 里做 ——
+            // 放那儿是因为副屏跨任务复用,只有真要新造的那一次才需要等。
             Log.i(TAG, "agent 屏 id=$id ${w}x$h@$dpi  保证: ${d.guarantees()}")
             return d
         }
