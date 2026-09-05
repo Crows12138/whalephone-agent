@@ -58,7 +58,12 @@ object Perception {
     ) {
         fun render(): String = buildString {
             appendLine("显示器 $displayId  前台: ${packages.joinToString(", ").ifBlank { "(空)" }}")
-            if (elements.isEmpty()) appendLine("(无可交互元素)")
+            // 「空」对模型是个歧义信号:可能是界面没加载完,也可能是这块屏上压根没开 App。
+            // 不说清楚它会反复按 home 或 back 想「退回去」,而这块屏根本没有可退的地方。
+            if (elements.isEmpty()) appendLine(
+                if (packages.isEmpty()) "(这块屏上还没有打开任何 App,用 launch 打开一个)"
+                else "(界面还没渲染出可交互元素,可以 wait 一下)"
+            )
             elements.forEach { appendLine(it.render()) }
         }
         fun byIndex(i: Int): Element? = elements.getOrNull(i)

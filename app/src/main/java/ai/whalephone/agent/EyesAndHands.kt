@@ -44,10 +44,17 @@ class EyesAndHands : AccessibilityService() {
                 }
                 ACT_CONFIG -> {
                     val k = i.getStringExtra("key").orEmpty()
-                    val v = i.getStringExtra("value").orEmpty()
+                    // 不带 value 就是删这个键。adb 的 `--es value ""` 传不进空串,
+                    // 想清掉一个配置只能靠「缺席」表达。
+                    val v = i.getStringExtra("value")
                     if (k.isNotBlank()) {
-                        Config.set(this@EyesAndHands, k, v)
-                        Log.i(TAG, "配置 $k = ${if (k.contains("KEY")) "***" else v}")
+                        if (v == null) {
+                            Config.remove(this@EyesAndHands, k)
+                            Log.i(TAG, "配置 $k 已清除")
+                        } else {
+                            Config.set(this@EyesAndHands, k, v)
+                            Log.i(TAG, "配置 $k = ${if (k.contains("KEY")) "***" else v}")
+                        }
                     }
                 }
             }

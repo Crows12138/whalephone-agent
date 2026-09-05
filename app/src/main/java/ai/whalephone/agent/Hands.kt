@@ -114,11 +114,27 @@ class Hands(
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
         // 往副屏启 App 会抢焦点并收起用户的输入法,和造屏一样,立刻还回去
         Privileged.handBackFocus()
-        return if (out.contains("Error") || out.contains("Exception")) "启动 $pkg 失败: ${out.trim()}"
-        else "已在副屏打开 $pkg"
+        if (out.contains("Error") || out.contains("Exception")) return "启动 $pkg 失败: ${out.trim()}"
+
+        // am start 是异步的:命令返回成功只表示 Intent 递出去了,不表示界面起来了。
+        // 淘宝这类 App 冷启动要好几秒,而循环下一帧快照在几百毫秒后就拍 —— 模型会
+        // 看到一块空屏,以为没启成功,于是再启一次,连着几次就被判定卡死。
+        // 所以这里同步等到目标 App 真的出现在这块屏上为止。
+        val deadline = System.currentTimeMillis() + LAUNCH_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(700)
+            val s = snapshot()
+            if (s.packages.any { it == pkg }) {
+                return "已在副屏打开 $pkg,当前 ${s.elements.size} 个可交互元素"
+            }
+        }
+        return "启动 $pkg 后等了 ${LAUNCH_TIMEOUT_MS / 1000} 秒界面还没出来,可能是启动慢或者被系统拦了"
     }
 
-    companion object { private const val TAG = "WPHands" }
+    companion object {
+        private const val TAG = "WPHands"
+        private const val LAUNCH_TIMEOUT_MS = 25_000L
+    }
 }
 
 /** 资源竞争的处理集中在这里,每一条都对应一次真机上量到的冲突 */

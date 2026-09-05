@@ -80,6 +80,9 @@ object Config {
     fun set(ctx: android.content.Context, key: String, value: String) =
         prefs(ctx).edit().putString(key, value).apply()
 
+    fun remove(ctx: android.content.Context, key: String) =
+        prefs(ctx).edit().remove(key).apply()
+
     fun llm(ctx: android.content.Context): Llm? {
         val base = get(ctx, KEY_BASE_URL, "https://api.deepseek.com/v1")
         val key = get(ctx, KEY_API_KEY)

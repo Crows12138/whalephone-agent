@@ -21,7 +21,11 @@ class ShellBridge : IShellBridge.Stub {
 
     private val displays = HashMap<Int, VirtualDisplay>()
 
-    constructor() : super()
+    constructor() : super() {
+        // 构造发生在 user service 进程的主线程,那里有 Looper。先把 Context 拿到缓存里,
+        // 后面 binder 线程上的调用就不用再碰 ActivityThread 了。
+        runCatching { ctx() }.onFailure { Log.w(TAG, "预热 Context 失败,留给首次调用重试", it) }
+    }
 
     override fun destroy() {
         synchronized(displays) {
@@ -85,8 +89,14 @@ class ShellBridge : IShellBridge.Stub {
      */
     private fun ctx(): android.content.Context {
         cached?.let { return it }
-        // systemMain() 内部要建 Handler,当前线程必须先有 Looper
-        if (android.os.Looper.getMainLooper() == null) android.os.Looper.prepareMainLooper()
+        // systemMain() 内部要 new Handler(),而无参 Handler 绑的是**当前线程**的 Looper。
+        // AIDL 的调用落在 binder 线程上,那种线程从来没有 Looper —— 只判断主 Looper
+        // 存不存在是不够的,Shizuku 的 user service 进程主线程本来就有 Looper,
+        // 守卫会直接跳过,然后在 binder 线程上炸掉。
+        if (android.os.Looper.myLooper() == null) {
+            if (android.os.Looper.getMainLooper() == null) android.os.Looper.prepareMainLooper()
+            else android.os.Looper.prepare()
+        }
         val at = Class.forName("android.app.ActivityThread")
         val thread = at.getMethod("systemMain").invoke(null)
         val c = at.getMethod("getSystemContext").invoke(thread) as android.content.Context
