@@ -51,7 +51,7 @@ class Hands(
 
         val b = Rect().also { e.node.getBoundsInScreen(it) }
         if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点击 [$i] 失败"
-        Privileged.exec("input -d $displayId tap ${b.centerX()} ${b.centerY()}")
+        Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
         Thread.sleep(CLICK_SETTLE_MS)
         return if (eyes == null || eyes.changedSince(displayId, t))
             "已点击 [$i] ${e.label()}(无障碍点击无效,补了一次真实触摸)"
@@ -78,8 +78,9 @@ class Hands(
         val pasted = clipboard.around { Actions.paste(ctxRef, e, text) }
         if (pasted) return "已在 [$i] 填入「$text」(用粘贴)"
 
-        val esc = text.replace("%", "%%").replace(" ", "%s")
-        Privileged.exec("input -d $displayId text $esc")
+        // 走 argv 不走 sh:text 来自模型,而模型的上下文里有无障碍树读来的、
+        // 攻击者可控的文字。拼进命令行就等于把 uid 2000 的 shell 交出去。
+        Privileged.execArgs("input", "-d", "$displayId", "text", text)
         if (Actions.verify(e, text)) return "已在 [$i] 填入「$text」(用按键注入)"
 
         return "[$i] 三种写法都没写进去,这个控件可能不接受外部输入"
@@ -92,7 +93,7 @@ class Hands(
 
     /** 带显示器维度的按键。这是唯一必须借 shell 的动作。 */
     fun key(code: Int): String {
-        val out = Privileged.exec("input -d $displayId keyevent $code")
+        val out = Privileged.execArgs("input", "-d", "$displayId", "keyevent", "$code")
         return if (out.isBlank() || out == "NO_BRIDGE") {
             if (out == "NO_BRIDGE") "按键失败:特权桥没连上" else "已按键 $code"
         } else "按键 $code: ${out.trim()}"
@@ -112,9 +113,9 @@ class Hands(
      * 注意返回键不一样:`input -d <屏> keyevent 4` 是按屏走的,实测有效。
      */
     fun home(): String {
-        val out = Privileged.exec(
-            "am start --display $displayId -a android.intent.action.MAIN " +
-                "-c android.intent.category.HOME"
+        val out = Privileged.execArgs(
+            "am", "start", "--display", "$displayId",
+            "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"
         )
         return if (out.contains("Error") || out == "NO_BRIDGE") "回桌面失败: ${out.trim()}"
         else "已回到副屏桌面"
@@ -130,10 +131,19 @@ class Hands(
             return "用户此刻正在前台用 $pkg,为避免把他的界面搬走,这一步先跳过;" +
                 "换个不冲突的做法,或者 ask 请示"
         }
+        if (!PKG.matches(pkg)) return "「$pkg」不是合法的包名"
+
+        // 原来这里是 `am start ... $(cmd package resolve-activity --brief $pkg | tail -1)`,
+        // 一条 sh 命令里既有命令替换又有模型给的 pkg。拆成两步:先解析组件名,
+        // 在 Kotlin 里取最后一行,再按 argv 启动。两步都不经过 sh。
+        val resolved = Privileged
+            .execArgs("cmd", "package", "resolve-activity", "--brief", pkg)
+            .trim().lines().lastOrNull()?.trim().orEmpty()
+        if (!COMPONENT.matches(resolved)) return "解析不出 $pkg 的启动组件: $resolved"
+
         // --activity-multiple-task 是关键;NEW_TASK 由 am 自己加,没有 --activity-new-task 这个参数
-        val out = Privileged.exec(
-            "am start --display $displayId --activity-multiple-task " +
-                "\$(cmd package resolve-activity --brief $pkg | tail -1)"
+        val out = Privileged.execArgs(
+            "am", "start", "--display", "$displayId", "--activity-multiple-task", "-n", resolved
         )
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
         // 往副屏启 App 会抢焦点并收起用户的输入法,和造屏一样,立刻还回去
@@ -160,6 +170,18 @@ class Hands(
         private const val LAUNCH_TIMEOUT_MS = 25_000L
         /** 点完等界面反应的时间。太短会把「慢」误判成「点不动」而多补一次触摸。 */
         private const val CLICK_SETTLE_MS = 500L
+
+        /**
+         * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是
+         * 你以为的那个命令」—— 比如在包名位置塞一个 --user 之类的选项。
+         */
+        private val PKG = Regex("[A-Za-z][A-Za-z0-9_]*([.][A-Za-z0-9_]+)+")
+        private val COMPONENT = Regex("[A-Za-z0-9_.]+/[A-Za-z0-9_.\$]+")
+
+        /**
+         * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是
+         * 你以为的那个命令」—— 比如包名位置塞一个 `--user 0` 之类的选项。
+         */
     }
 }
 

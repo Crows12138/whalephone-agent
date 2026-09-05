@@ -11,8 +11,14 @@ interface IShellBridge {
     /** Shizuku 约定的固定 transaction id,不能改 */
     void destroy() = 16777114;
 
-    /** 执行 shell 命令,返回 stdout+stderr */
+    /** 执行 shell 命令,返回 stdout+stderr。命令行会被 sh 解析,只许传固定字面量。 */
     String exec(String cmd) = 1;
+
+    /**
+     * 按 argv 直接 exec,不经过 sh。凡是命令里含有模型给的字符串,一律走这条 ——
+     * 没有 shell 解析,就没有注入面。
+     */
+    String execArgs(in List<String> argv) = 4;
 
     /** 造一块受信虚拟显示器,返回 displayId;失败返回 -1 */
     int createDisplay(int w, int h, int dpi, in Surface surface, int flags) = 2;

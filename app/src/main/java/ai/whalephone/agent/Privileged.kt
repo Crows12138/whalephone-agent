@@ -66,6 +66,10 @@ object Privileged {
     fun exec(cmd: String): String =
         bridge?.exec(cmd) ?: "NO_BRIDGE"
 
+    /** 命令里带模型给的字符串时用这个,不走 sh,见 IShellBridge.execArgs */
+    fun execArgs(vararg argv: String): String =
+        bridge?.execArgs(argv.toMutableList()) ?: "NO_BRIDGE"
+
     fun createAgentDisplay(w: Int, h: Int, dpi: Int, surface: Surface): Int =
         bridge?.createDisplay(w, h, dpi, surface, ShellBridge.AGENT_DISPLAY_FLAGS) ?: -1
 

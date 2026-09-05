@@ -437,3 +437,34 @@ PRO **3** 代的广告(¥818),它识别出来并报了第一个真正的二代(�
 前两轮改的是提示词,方向错了。**模型反复做同一件无效的事,先怀疑那件事是不是
 真的无效,而不是先怀疑模型**。判断依据很明确:把失败信号显式喂给它、它看见了
 还照做,就不是模型的问题。
+
+
+## 模型的字符串拼进了 sh -c
+
+回答「DeepSeek 输出的是不是操控手机的 shell」时顺手查的,结果查出个洞。
+
+模型的输出确实只有 JSON、只有封闭词表 —— 但有两处把它给的字符串拼进了
+`ProcessBuilder("sh","-c",cmd)` 的命令行:
+
+```kotlin
+val esc = text.replace("%","%%").replace(" ","%s")   // 只转义了这两个
+Privileged.exec("input -d $displayId text $esc")
+Privileged.exec("am start ... \$(cmd package resolve-activity --brief $pkg | tail -1)")
+```
+
+`;` `&&` 反引号 `$()` 全部能过去,而这个 shell 是 uid 2000。
+
+真正的威胁面不是模型,是**无障碍树里的文字是攻击者可控的** —— 商品标题、网页
+内容、通知文本都进模型上下文。构造一段文案诱导模型把 payload 当搜索词填进去,
+就是 prompt injection 提权到 shell。
+
+解法见 TECH-CHOICES 第八节:加 `execArgs(List<String>)` 走 argv 直接 execve,
+凡含模型字符串的命令一律走它,`launch` 里的 `$(...)` 拆成两步。回归检查进了特权桥自检:
+
+```
+注入面: 干净 —— 参数没有被 sh 解析
+```
+
+改完跑同一个任务:9 步完成,launch / set_text / click+触摸降级 全部照常。
+
+教训:**「模型只能输出结构化动作」不等于安全**,得看那些动作的参数最后流到哪儿。

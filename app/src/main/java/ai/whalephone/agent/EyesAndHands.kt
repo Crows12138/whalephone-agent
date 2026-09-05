@@ -172,6 +172,27 @@ class EyesAndHands : AccessibilityService() {
      * 不需要解锁、不需要人看着 —— 这条路上每一步能不能成都是设备相关的,
      * 必须在真机上量,不能靠读文档下结论。
      */
+    /**
+     * 注入面回归检查。
+     *
+     * 凡是命令里含模型给的字符串,都必须走 execArgs(直接 execve,不经过 sh)。
+     * 这条链值得盯着:无障碍树里的文字(商品标题、网页内容、通知)是攻击者可控的,
+     * 它们进模型上下文、模型输出又变成命令参数 —— 中间任何一处做字符串拼接,
+     * 都等于把 uid 2000 的 shell 交出去。
+     *
+     * 这里拿一个真实 payload 走一遍:参数里的 `;` 如果被 shell 解析,探针文件就会
+     * 被创建出来。
+     */
+    private fun injectionCheck() {
+        val probe = "/data/local/tmp/wp_inject_probe"
+        Privileged.exec("rm -f $probe")
+        Privileged.execArgs("echo", "x; touch $probe")
+        val leaked = Privileged.exec("ls $probe 2>/dev/null").isNotBlank()
+        Log.i(TAG, "注入面: " + if (leaked) "有洞 —— execArgs 的参数被 sh 解析了"
+                                else "干净 —— 参数没有被 sh 解析")
+        Privileged.exec("rm -f $probe")
+    }
+
     private fun bridgeSelfTest() {
         Log.i(TAG, "---- 特权桥自检 ----")
         Log.i(TAG, "Shizuku 在运行=${Privileged.shizukuAlive()} 已授权=${Privileged.shizukuGranted()}")
@@ -179,6 +200,7 @@ class EyesAndHands : AccessibilityService() {
         Log.i(TAG, "桥连上=$ok")
         if (!ok) { Log.i(TAG, "---- 自检中止 ----"); return }
         Log.i(TAG, "whoami: " + Privileged.exec("id").trim())
+        injectionCheck()
 
         val m = resources.displayMetrics
         val d = AgentDisplay.create(m.widthPixels, m.heightPixels, m.densityDpi)

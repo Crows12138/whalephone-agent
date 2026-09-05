@@ -42,6 +42,23 @@ class ShellBridge : IShellBridge.Stub {
         out
     }.getOrElse { "EXEC_FAIL: ${it.message}" }
 
+    /**
+     * 不经过 sh 的执行路径。ProcessBuilder 收 argv 数组时是直接 execve,
+     * 参数里的 ; && ` $() 全部只是普通字符 —— 注入这一类问题在这里不存在。
+     *
+     * 无障碍树里的文字是攻击者可控的(商品标题、网页内容、通知),它们会进模型的
+     * 上下文,模型的输出又会变成命令参数。这条链上任何一处做字符串拼接,
+     * 都等于把 uid 2000 的 shell 交出去。
+     */
+    override fun execArgs(argv: MutableList<String>?): String = runCatching {
+        val a = argv?.toList().orEmpty()
+        if (a.isEmpty()) return "EXEC_FAIL: 空命令"
+        val p = ProcessBuilder(a).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().use(BufferedReader::readText)
+        p.waitFor()
+        out
+    }.getOrElse { "EXEC_FAIL: ${it.message}" }
+
     override fun createDisplay(w: Int, h: Int, dpi: Int, surface: Surface?, flags: Int): Int {
         return runCatching {
             val dm = displayManager()
