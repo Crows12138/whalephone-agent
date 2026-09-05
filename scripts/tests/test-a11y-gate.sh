@@ -35,6 +35,9 @@ svcs()  { sh settings get secure enabled_accessibility_services | tr -d '\r'; }
 # 两种写法都要认,而把点和斜杠转义成正则是这个项目里反复踩的反斜杠折叠坑。
 # 「whalephone」这个子串在系统的无障碍服务里独一无二,定长匹配就够,还坏不了。
 hasme() { svcs | grep -qF whalephone && echo yes || echo no; }
+# 表里有几项是我们。0 和 2 都是错:2 说明短名/全名被当成了两个不同的项各追加一遍。
+nme()  { svcs | tr ':' '
+' | grep -cF whalephone; }
 hastb() { svcs | grep -q "marvin.talkback" && echo yes || echo no; }
 enab()  { sh settings get secure accessibility_enabled | tr -d '\r'; }
 
@@ -131,6 +134,25 @@ chk "起点:机主自己开着(没有 MARK)" "$(hasme)" "yes"
 run_task "" 90; RC=$?
 naps 4
 chk "跑完还开着 —— 不是我们开的就不该我们关" "$(hasme)" "yes"
+# 起点写的是短名 pkg/.Cls,A11yGate 内部用的是全名 pkg/pkg.Cls。
+# 按字符串比的话它认不出表里已经有自己,会再追加一遍全名 —— 表里就有两项。
+chk "表里只有一项是我们,没被重复追加" "$(nme)" "1"
+echo "   收工后的表: $(svcs)"
+echo
+
+# ---------------------------------------------------------------- 3b
+echo "== 3b. 残留的写成短名,收工时也要摘干净 =="
+# 同一个组件在这张表里有两种等价写法:pkg/pkg.Cls 和 pkg/.Cls。机主从设置里开的、
+# 脚本写的、AccessibilityManagerService 归一化后的,未必是同一种。
+# 真机上实测 AMS 会在写入后把短名展开成全名 —— 按字符串比就会「明明有却认不出」,
+# 关的时候摘不掉,权限留着而且不报错。这一条专门盯这个。
+reset "$SELF"
+STORED=$(svcs)
+setpref a11y_opened_by_us 1
+run_task "" 90; RC=$?
+naps 4
+echo "   起点表里存的写法: $STORED"
+chk "短名写法的残留也摘掉了" "$(hasme)" "no"
 echo
 
 # ---------------------------------------------------------------- 4

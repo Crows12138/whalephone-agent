@@ -1,5 +1,6 @@
 package ai.whalephone.agent
 
+import android.content.ComponentName
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
@@ -28,7 +29,22 @@ object A11yGate {
     private const val TAG = "WPGate"
     private const val KEY = "enabled_accessibility_services"
     private const val ENABLED = "accessibility_enabled"
-    private const val SELF = "ai.whalephone.agent/ai.whalephone.agent.EyesAndHands"
+    private val SELF_CN = ComponentName(
+        "ai.whalephone.agent", "ai.whalephone.agent.EyesAndHands")
+    private val SELF = SELF_CN.flattenToString()
+
+    /**
+     * 这一项是不是我们自己。**不能拿字符串相等去判**。
+     *
+     * 同一个组件在这张表里有两种等价写法:`pkg/pkg.Cls` 和缩写的 `pkg/.Cls`。
+     * 机主从设置里开的、脚本写进去的、AccessibilityManagerService 自己归一化过的,
+     * 三者未必是同一种写法 —— 真机上实测到 AMS 会在写入后把短名展开成全名,
+     * 顺带把表里解析不出组件的项直接剔掉。
+     * 按字符串比就会出现「表里明明有我们,却认不出来」:开的时候重复追加一遍,
+     * 关的时候摘不掉,权限留在那里而且不报错。
+     */
+    private fun isSelf(entry: String) =
+        ComponentName.unflattenFromString(entry.trim()) == SELF_CN
 
     /** 关掉自动开关,让权限保持常开。给不在乎微信支付、更在乎长时任务的人留的口子。 */
     const val KEY_AUTO = "A11Y_AUTO"
@@ -85,7 +101,7 @@ object A11yGate {
         if (!Privileged.ready) { Log.w(TAG, "特权桥没连上,开不了无障碍"); return false }
 
         val before = services() ?: run { Log.w(TAG, "读不到无障碍服务表,不动它"); return false }
-        if (before.contains(SELF)) {
+        if (before.any { isSelf(it) }) {
             // 表里有我们,但服务没起来 —— 多半是 accessibility_enabled 被关了
             Privileged.execArgs("settings", "put", "secure", ENABLED, "1")
         } else {
@@ -115,7 +131,7 @@ object A11yGate {
         if (Watch.plan(ctx) != null) { Log.i(TAG, "还有长时任务在盯着,权限先留着"); return }
         // 读不到就一步都不动,MARK 也留着 —— 下次起来还认得出这摊没收拾完。
         val left = (services() ?: run { Log.w(TAG, "读不到无障碍服务表,这次不收尾,记号留着"); return })
-            .filter { it != SELF }
+            .filterNot { isSelf(it) }
         write(left)
         Config.remove(ctx, MARK)
         Log.i(TAG, "已关闭无障碍(剩下 ${left.size} 个别的服务,没动它们)")

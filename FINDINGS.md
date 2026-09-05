@@ -892,6 +892,27 @@ agent 主动让路次数  1
 无障碍,亮屏触发器就跟着没了,后面所有轮次一起哑掉且不报错。5b 不只看权限还在,
 还要求闸门自己那行日志在,否则算归因失败。
 
+**真机上抓到一个模拟器测不出的 bug:组件名有两种写法。** 在三星上验「shell 身份
+(uid 2000)能不能改这条 secure setting」时,顺手往表里塞了一项不存在的组件,读回来
+是这样的:
+
+```
+写入:  ai.whalephone.agent/.EyesAndHands : ai.whalephone.probe/.Nope
+读回:  ai.whalephone.agent/ai.whalephone.agent.EyesAndHands
+```
+
+写是写进去了(所以那条路径成立)。是 AccessibilityManagerService 立刻重写了这张表:
+剔掉解析不出组件的项,并把短名 `pkg/.Cls` 展开成全名 `pkg/pkg.Cls`。
+
+`A11yGate` 原来拿全名字符串做相等比较来找自己那一项。表里存的可能是短名 ——
+机主从设置里开的、脚本写的、AMS 归一化前的,三者未必同一种写法。按字符串比就会
+「明明有却认不出」:开的时候重复追加一遍,关的时候摘不掉,权限留在那儿而且不报错。
+改成按 `ComponentName` 比较,两种写法自动等价。
+
+模拟器上测不出来是因为那边表里的值一直是 A11yGate 自己写的全名,而测试里判断
+「表里有没有我们」用的是 `grep whalephone` 这种粗匹配 —— 重复追加和摘不掉都能蒙混
+过去。补了两条断言:表里只能有一项是我们(防重复追加),短名写法的残留也要摘干净。
+
 **模拟器跑久了会自己坏掉,而且坏得像被测代码的错。** 连着跑几十轮任务之后软键盘
 叫不起来了,`raise_ime` 连续失败;查 `dumpsys input_method`,IMMS 里堆着几十个我们
 app 的 `ClientState`,`mSelfReportedDisplayId` 是 7 / 17 / 30 / 67…—— 全是历史虚拟屏
