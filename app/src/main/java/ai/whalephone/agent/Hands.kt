@@ -34,6 +34,25 @@ class Hands(
     private fun el(i: Int) = last?.byIndex(i)
 
     /**
+     * 往副屏注入一次真实输入,然后立刻把焦点还给机主。
+     *
+     * 真实事件带着显示器维度进 InputDispatcher,会把**全局焦点屏**拽到副屏上,
+     * 机主的输入法当场被收起 —— 他正打字的话,手指会悬在半空。
+     * 实测机主真手指使用时,一个 27 步的任务打断了 6 次,52 次采样焦点不在主屏。
+     *
+     * 造副屏和往副屏启 App 这两处本来就记得还焦点,但那是散在调用点的约定,
+     * 而不是强制。今天新加 tap / swipe / enter 时我就忘了 —— 所以把它收进这里:
+     * 凡是真实注入,都从这条路走,想忘也忘不掉。
+     *
+     * 注意无障碍动作(performAction)不走这里 —— 它根本不经过输入系统,不碰焦点。
+     */
+    private fun inject(vararg argv: String): String {
+        val out = Privileged.execArgs(*argv)
+        Privileged.handBackFocus()
+        return out
+    }
+
+    /**
      * 一个动作有没有真的生效,唯一可靠的判据是**界面动没动** —— 返回值一律不信。
      *
      * 无障碍动作和注入的按键都可能「成功地什么也没做」:节点收下 ACTION_CLICK 但
@@ -99,7 +118,7 @@ class Hands(
         val b = Rect().also { e.node.getBoundsInScreen(it) }
         if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点不动 [$i],也拿不到它的位置"
         val moved = changed {
-            Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
+            inject("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
         }
         return if (moved) "已点击 [$i] ${e.label()}(无障碍点击对它无效,改用真实触摸)"
         else "点了 [$i] ${e.label()},界面仍然没有反应 —— 这个元素点不动,换一个"
@@ -127,7 +146,7 @@ class Hands(
 
         // 走 argv 不走 sh:text 来自模型,而模型的上下文里有无障碍树读来的、
         // 攻击者可控的文字。拼进命令行就等于把 uid 2000 的 shell 交出去。
-        Privileged.execArgs("input", "-d", "$displayId", "text", text)
+        inject("input", "-d", "$displayId", "text", text)
         if (Actions.verify(e, text)) return "已在 [$i] 填入「$text」(用按键注入)"
 
         return "[$i] 三种写法都没写进去,这个控件可能不接受外部输入"
@@ -159,7 +178,7 @@ class Hands(
         }
         val where = if (i == null) "副屏" else "[$i]"
         return if (changed {
-                Privileged.execArgs("input", "-d", "$displayId", "swipe", "$cx", "$cy", "$ex", "$ey", "300")
+                inject("input", "-d", "$displayId", "swipe", "$cx", "$cy", "$ex", "$ey", "300")
             }) "已在$where 上向 $direction 划了一下"
         else "在$where 上向 $direction 划了,但界面没有任何反应 —— 这里划不动,换个位置或换个动作"
     }
@@ -177,7 +196,7 @@ class Hands(
         if (b.isEmpty) return "[$i] 拿不到位置"
         return if (changed {
                 repeat(2) {
-                    Privileged.execArgs("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
+                    inject("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
                 }
             }) "已双击 [$i] ${e.label()}"
         else "双击 [$i] 后界面没有任何反应"
@@ -194,7 +213,7 @@ class Hands(
     /** 带显示器维度的按键。这是唯一必须借 shell 的动作。 */
     fun key(code: Int): String {
         var out = ""
-        val moved = changed { out = Privileged.execArgs("input", "-d", "$displayId", "keyevent", "$code") }
+        val moved = changed { out = inject("input", "-d", "$displayId", "keyevent", "$code") }
         return when {
             out == "NO_BRIDGE" -> "按键失败:特权桥没连上"
             out.isNotBlank()   -> "按键 $code: ${out.trim()}"
@@ -291,7 +310,9 @@ class Hands(
             "am", "start", "--display", "$displayId", "--activity-multiple-task", "-n", resolved
         )
         Log.i(TAG, "launch $pkg -> ${out.trim()}")
-        // 往副屏启 App 会抢焦点并收起用户的输入法,和造屏一样,立刻还回去
+        // am start 是异步的:这时候只是 Intent 递出去了,App 的窗口还没出现。
+        // 所以这里还一次不够 —— 窗口几秒后冒出来时会再把焦点抢走一次。
+        // 真正有效的一次在下面轮询到 App 出现之后。
         Privileged.handBackFocus()
         if (out.contains("Error") || out.contains("Exception")) return "启动 $pkg 失败: ${out.trim()}"
 
@@ -299,11 +320,20 @@ class Hands(
         // 淘宝这类 App 冷启动要好几秒,而循环下一帧快照在几百毫秒后就拍 —— 模型会
         // 看到一块空屏,以为没启成功,于是再启一次,连着几次就被判定卡死。
         // 所以这里同步等到目标 App 真的出现在这块屏上为止。
+        // 冷启动这段时间是整套东西里对机主危害最大的窗口。实测:
+        //   - am start 会把全局焦点挪到副屏,并**收起机主的软键盘**(唯一会收键盘的操作)
+        //   - 焦点不在机主那块屏时,他一碰屏幕,他的 app 就会
+        //     「Input dispatching timed out (Application does not have a focused window)」ANR
+        // 淘宝这类 App 冷启动要好几秒,所以不能只在启动前后各还一次焦点 ——
+        // 整个轮询期间每一轮都要把焦点推回去,把敞口压到最小。
         val deadline = System.currentTimeMillis() + LAUNCH_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(700)
+            Privileged.handBackFocus()
             val s = snapshot()
             if (s.packages.any { it == pkg }) {
+                // App 的窗口这时才真的出现,焦点也是这时被抢走的
+                Privileged.handBackFocus()
                 return "已在副屏打开 $pkg,当前 ${s.elements.size} 个可交互元素"
             }
         }

@@ -130,7 +130,16 @@ class Agent(
         "home"       -> hands.home()
         "wait"       -> { Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下" }
         else         -> "不认识的动作 $name"
-    }.also { Thread.sleep(600) }   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
+    }.also {
+        Thread.sleep(600)   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
+        // 兜底:每一步收尾都把全局焦点还给机主。
+        //
+        // 单靠「哪个动作会抢焦点就在哪里还」是不够的 —— 焦点不只被我们的动作抢走,
+        // 副屏上任何一个新窗口冒出来(页面跳转、弹窗、App 冷启动完成)都会留住它,
+        // 而那些时刻不在我们的调用点上。实测机主真手指打字时,只修调用点仍会被打断。
+        // 这里每步一次,相对于一步好几秒的耗时可以忽略。
+        Privileged.handBackFocus()
+    }
 
     private fun record(n: Int, thought: String, action: String, result: String) {
         Log.i(TAG, "     -> $result")

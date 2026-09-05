@@ -49,6 +49,7 @@ class EyesAndHands : AccessibilityService() {
                     // 不带 value 就是删这个键。adb 的 `--es value ""` 传不进空串,
                     // 想清掉一个配置只能靠「缺席」表达。
                     val v = i.getStringExtra("value")
+                    if (k == "TRACE_EVENTS") trace = (v == "1")
                     if (k.isNotBlank()) {
                         if (v == null) {
                             Config.remove(this@EyesAndHands, k)
@@ -98,10 +99,15 @@ class EyesAndHands : AccessibilityService() {
      */
     private val lastChange = SparseLongArray()
 
+    /** 事件追踪开关,只在 CONFIG 广播时更新,不在事件回调里查配置 */
+    @Volatile private var trace = false
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
-        if (Config.get(this, "TRACE_EVENTS") == "1")
-            Log.i(TAG, "evt 屏=${e.displayId} ${AccessibilityEvent.eventTypeToString(e.eventType)} pkg=${e.packageName}")
+        // 这个回调跑在主线程上,而且滚动一个信息流就是成百上千次。
+        // 这里做的任何事都得是常数级的 —— 原来每次都读一遍 SharedPreferences,
+        // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
+        if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${AccessibilityEvent.eventTypeToString(e.eventType)}")
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,

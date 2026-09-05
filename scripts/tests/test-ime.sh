@@ -1,71 +1,75 @@
-#!/bin/bash
-cd "$(dirname "$0")/.."
-source scripts/lib.sh
+#!/usr/bin/env bash
+# 机主的输入法,在 agent 干活的全程有没有被收起过。
+#
+# 为什么不是数「字有没有丢」:
+#   之前的并发测试用 `input -d 0 text` 一秒打一个字,跑完比对字符串,26/26 通过,
+#   于是我在文档里写了「不打扰」。机主用真手指一试就断了。
+#   原因是那个指标错了 —— **键盘被收起来之后,重新点一下输入框还能接着打**,
+#   字并不会丢。丢的是机主的连续性,而那个测试看不见。
+#
+# 直接测输入法自己的状态:`dumpsys input_method` 的 mInputShown。
+# 它是真实 IME 的真实状态,跟字是怎么进去的无关。任何一次 true -> false
+# 都是一次实打实的打扰。同时记 FocusedDisplayId,用来定位是谁把焦点拽走的。
+#
+# 用法: bash scripts/tests/test-ime.sh ["任务"]
 
-foc()  { sh dumpsys input 2>/dev/null | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-9]+"; }
-ime()  { sh dumpsys input_method 2>/dev/null | grep -E "mInputShown|mShowRequested|mDisplayIdToShowIme|mCurTokenDisplayId" | sed 's/^ *//' | tr '\n' ' '; }
-tree() { sh uiautomator dump //sdcard/t.xml >/dev/null 2>&1; "$ADB" shell cat //sdcard/t.xml 2>/dev/null > /tmp/t.xml; }
-# 找第一个 EditText 的中心坐标
-findedit() {
-  grep -oE '<node[^>]*class="[^"]*(EditText|AutoCompleteTextView)"[^>]*>' /tmp/t.xml | head -1 \
-   | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+' | tr '\n' ' '
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
+A=ai.whalephone.agent
+GOAL="${1:-打开淘宝,搜索「保温杯」,告诉我前两个商品的价格和店铺}"
+
+ime()   { sh dumpsys input_method | grep -oE "mInputShown=[a-z]+" | head -1 | cut -d= -f2; }
+focus() { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-9]+$" | head -1; }
+
+echo "== 准备:在主屏上把真实输入法叫出来 =="
+# 用 Edge 的地址栏,不用本 app 自己的输入框。
+# 焦点被挪到副屏期间,机主前台的 app 一旦收到触摸就会
+# 「Input dispatching timed out」ANR,而 ANR 对话框本身也会带走键盘 ——
+# 拿本 app 当载体,等于用一个会被待测现象弄坏的东西去测那个现象,
+# 量出来的「被收起 6 次」里有几次是自己的 ANR 造成的都分不清。
+sh dumpsys activity activities | grep -m1 topResumedActivity | grep -q emmx || {
+  sh monkey -p com.microsoft.emmx -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  python -c "import time;time.sleep(5)"
 }
-# 读所有 EditText 的 text
-edittext() { grep -oE '<node[^>]*search_src_text[^>]*>|<node[^>]*(EditText|AutoCompleteTextView)[^>]*>' /tmp/t.xml | head -1 | grep -oE 'text="[^"]*"' | head -1; }
+for _ in 1 2 3; do
+  sh logcat -c; sh am broadcast -a $A.SNAP --ei display 0 >/dev/null 2>&1
+  python -c "import time;time.sleep(2)"
+  I=$(sh logcat -d -s WPEyes:* | grep -oE '\[[0-9]+\] EditText' | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "$I" ] && {
+    sh am broadcast -a $A.CLICK --ei display 0 --ei index "$I" >/dev/null 2>&1
+    python -c "import time;time.sleep(2.5)"
+    [ "$(ime)" = "true" ] && break
+  }
+done
+[ "$(ime)" != "true" ] && { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
+echo "   输入法已弹出 mInputShown=true  焦点屏=$(focus)"
 
-echo "════ 0. 主屏打开设置并进入搜索框 ════"
-sh am start -a android.settings.SETTINGS >/dev/null 2>&1; sleep 3
-tree; C=$(findedit)
-if [ -z "$C" ]; then
-  echo "  设置首页没有 EditText,找搜索入口..."
-  SB=$(grep -oE '<node[^>]*(content-desc="搜索[^"]*"|resource-id="[^"]*search[^"]*")[^>]*>' /tmp/t.xml | head -1 | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+' | tr '\n' ' ')
-  if [ -n "$SB" ]; then set -- $SB; sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null; sleep 3; tree; C=$(findedit); fi
-fi
-[ -z "$C" ] && { echo "  ✗ 找不到输入框,dump 里的可点元素:"; grep -oE 'content-desc="[^"]{1,12}"' /tmp/t.xml | sort -u | head -10; exit 1; }
-set -- $C; EX=$(( ($1+$3)/2 )); EY=$(( ($2+$4)/2 ))
-echo "  输入框中心 = ($EX,$EY)"
-sh input -d 0 tap $EX $EY >/dev/null; sleep 2
+echo
+echo "== 开跑,全程采样 =="
+sh logcat -c
+sh am broadcast -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
 
-echo; echo "════ 1. 基线:只有用户在打字 ════"
-echo "  焦点屏 = $(foc)"
-echo "  IME    = $(ime)"
-sh input -d 0 text "AAAA" >/dev/null; sleep 2
-tree; echo "  输入框内容 = $(edittext)"
-
-echo; echo "════ 2. 起虚拟屏(agent 上线) ════"
-"$SCRCPY" --new-display=1080x2340/450 --no-audio --start-app=com.sec.android.app.popupcalculator >/tmp/sA.log 2>&1 &
-SPID=$!; sleep 8
-VD=$(vdid); echo "  VD = $VD   焦点屏 = $(foc)"
-echo "  IME = $(ime)"
-
-echo; echo "════ 3. 用户点回输入框继续打字 ════"
-sh input -d 0 tap $EX $EY >/dev/null; sleep 2
-echo "  焦点屏 = $(foc)"
-echo "  IME    = $(ime)"
-sh input -d 0 text "BB" >/dev/null; sleep 1
-tree; echo "  内容 = $(edittext)   (期望 AAAABB)"
-
-echo; echo "════ 4. ★ agent 在虚拟屏上动手 ★ ════"
-sh input -d "$VD" tap 540 1200 >/dev/null; sleep 2
-echo "  焦点屏 = $(foc)      <- 预期被抢到 $VD"
-echo "  IME    = $(ime)"
-
-echo; echo "════ 5. 用户继续打字(不重新点输入框) ════"
-sh input -d 0 text "CC" >/dev/null; sleep 2
-sh input -d 0 tap $EX $EY >/dev/null; sleep 2   # 点回来才能读主屏树
-tree; echo "  内容 = $(edittext)"
-echo "  --> AAAABBCC = 完全没影响 | AAAABB = CC 丢了 | 其他 = 焦点乱了"
-
-echo; echo "════ 6. agent 连续操作 5 次,看键盘是否被反复打断 ════"
-sh input -d 0 tap $EX $EY >/dev/null; sleep 2
-for i in 1 2 3 4 5; do
-  sh input -d "$VD" tap 540 1200 >/dev/null
-  sleep 1
-  printf "  第%d次后: 焦点=%s  IME=%s\n" $i "$(foc)" "$(ime)"
+DROPS=0; STEAL=0; PREV=true
+for i in $(seq 1 200); do
+  M=$(ime); F=$(focus)
+  [ "$PREV" = "true" ] && [ "$M" = "false" ] && {
+    DROPS=$((DROPS+1)); echo "   [$(date +%H:%M:%S)] 输入法被收起(第 $DROPS 次)  焦点屏=$F"
+  }
+  [ -n "$F" ] && [ "$F" != "0" ] && STEAL=$((STEAL+1))
+  PREV="$M"
+  sh logcat -d -s WPSvc:* | grep -q "结束 done=" && break
+  python -c "import time;time.sleep(0.4)"
 done
 
-echo; echo "════ 7. 清理 ════"
-kill $SPID 2>/dev/null; sleep 2
-sh input -d 0 keyevent 3 >/dev/null   # HOME,退出设置
-sh rm -f //sdcard/t.xml
-echo "完成"
+echo
+echo "== agent 那边做了什么 =="
+sh logcat -d -s WPAgent:* | grep -oE "第 [0-9]+ 步 [a-z_]+" | tr '\n' ' '; echo
+sh logcat -d -s WPSvc:* | grep "结束 done=" | sed -E 's/.*WPSvc  : /   /'
+
+echo
+ANRS=$(sh logcat -d -b events 2>/dev/null | grep -c "am_anr")
+echo "== 结论 =="
+echo "   期间 ANR 次数        $ANRS   (要求 0)"
+echo "   输入法被收起次数    $DROPS   (要求 0)"
+echo "   焦点不在主屏的采样  $STEAL 次 (要求 0;短暂离开随即还回来也会被采到)"
+echo "   最终 mInputShown=$(ime)  焦点屏=$(focus)"
+[ "$DROPS" -eq 0 ] && echo "   机主的键盘全程没被动过 ✓" || echo "   机主的键盘被打断了 ✗"

@@ -506,3 +506,75 @@ PHYS=$(dumpsys SurfaceFlinger --display-id | grep -oE "Display [0-9]+" | ... | h
 而且 AndroidWorld 的 T3A/M3A 对比是外部旁证。`AgentDisplay` 继续用 ImageReader,
 但理由改成了实事求是的那个:自己持有 Surface,不走 shell、不用每次造屏都去解析一次
 SurfaceFlinger 的 ID,取景窗要连续出帧这条更直接 —— 而不是「别无选择」。
+
+## 「不打扰机主」这条,我之前测的是错的指标
+
+机主用真手指试了一次,报告:任务能跑完,但**输入法一直被打断**,而且 WhalePhone
+自己**一直显示「没有响应」**。而我的并发测试一直是绿的。
+
+### 为什么原来的测试测不出来
+
+原来数的是「字有没有丢」:`input -d 0 text a` 一秒一个,跑完比对字符串,26/26 通过。
+问题是**键盘被收起来之后,下一个 `input text` 照样能写进那个还聚焦着的输入框**,
+所以字一个不丢。丢的是机主的连续性 —— 手指悬在半空、键盘没了 —— 而那个指标看不见。
+
+换成直接读 `dumpsys input_method` 的 `mInputShown`(真实 IME 的真实状态),
+一跑就是 6 次 true→false。
+
+### 逐个操作归因(主屏 Edge 地址栏聚焦,副屏计算器)
+
+| 操作 | 全局焦点屏 | 机主的软键盘 |
+|---|---|---|
+| 无障碍 `performAction` 点击 | 0 → 0 | 不受影响 |
+| 无障碍 `ACTION_FOCUS + SET_TEXT` | 0 → 0 | 不受影响 |
+| `input -d N tap` | 0 → N | 不受影响 |
+| `input -d N keyevent` | 0 → N | 不受影响 |
+| `input -d N swipe` | 0 → N | 不受影响 |
+| **`am start --display N`** | 0 → N | **被收起** |
+| 副屏上的**页内跳转** | 0 → N | 不受影响 |
+
+**我怀疑了一整轮的 tap / swipe / enter 全是无辜的。** 唯一会收键盘的是往副屏启 App。
+
+### ANR 和输入法消失是同一条链
+
+```
+am start --display N / 注入  →  全局焦点移到副屏
+                             →  机主前台那个 app 没有聚焦窗口
+                             →  他一碰屏幕,输入派发超时
+                             →  Input dispatching timed out (Application does not
+                                have a focused window)  →  ANR 对话框  →  键盘随之消失
+```
+
+`am_anr` 日志坐实了这条。**触发条件是机主的手指碰屏幕** —— 所以合成注入的测试
+永远测不出来:我的测试从不"碰屏"。
+
+而且第一次量出的 6 次里有几次是我自己造成的:那次我拿 WhalePhone 自己的输入框
+当载体,而它正因为上面这条在 ANR。**用一个会被待测现象弄坏的东西去测那个现象。**
+
+### 为什么不能事后补救
+
+`input -d 0 keyevent 0` 能把焦点指针推回主屏,但**不会重新弹出已经收起的软键盘**。
+所以"抢了再还"这条路本身不成立,只能从源头不碰。
+
+### 根子上的限制
+
+副屏申请到了 `FLAG_OWN_FOCUS` 和 `FLAG_OWN_DISPLAY_GROUP`,但实际拿到的是:
+
+```
+DisplayInfo{"whalephone-agent", displayId 132, displayGroupId 0, ... FLAG_OWN_FOCUS}
+```
+
+**`displayGroupId 0` —— 和主屏同一个组。** 传进去的 `DEVICE_DISPLAY_GROUP`(1<<15)
+被系统静默丢弃。焦点是整组共享的,所以副屏上一出现新窗口,机主的键盘就没了。
+这和之前那条「电源组也只有 0」是同一类:**这些 flag 申请得到,但在这台机器上不生效**。
+
+### 改了什么,还剩什么
+
+- 每次真实注入之后立刻还焦点,收进 `inject()`,调用方想忘也忘不掉
+- `launch` 的冷启动轮询期间每轮都还一次焦点 —— 那是最长的敞口(最多 25 秒),
+  也正是机主碰屏最容易撞上 ANR 的时候
+- 每步收尾兜底还一次焦点
+
+实测从 6 次降到 2 次,任务结束时 `mInputShown=true`、焦点回到主屏(之前是 false / 留在副屏)。
+**但没有归零**,而且期间仍有 1 次 ANR。剩下的是 `am start` 那一次固有的收键盘,
+以及一次尚未定位的。这条没做完,不写成做完。
