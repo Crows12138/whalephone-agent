@@ -26,6 +26,7 @@ private const val TAG = "WPEyes"
  *   CLICK --ei display N --es text S | --ei index I
  *   TEXT  --ei display N --ei index I --es text S
  *   TYPING                        机主此刻在不在打字,两路信号分别报
+ *   YIELD                         直接测闸门:机主在打字时会不会停下来等
  */
 class EyesAndHands : AccessibilityService() {
 
@@ -41,6 +42,7 @@ class EyesAndHands : AccessibilityService() {
                 ACT_TEXT  -> setText(d, i.getIntExtra("index", -1), i.getStringExtra("text") ?: "")
                 ACT_BRIDGE -> Thread { bridgeSelfTest() }.start()
                 ACT_TYPING -> Thread { typingCheck() }.start()
+                ACT_YIELD -> Thread { yieldCheck() }.start()
                 ACT_RUN -> {
                     val g = i.getStringExtra("goal").orEmpty()
                     Log.i(TAG, "收到任务: $g")
@@ -74,7 +76,7 @@ class EyesAndHands : AccessibilityService() {
             IntentFilter().apply {
                 addAction(ACT_DUMP); addAction(ACT_SNAP); addAction(ACT_CLICK)
                 addAction(ACT_TEXT); addAction(ACT_BRIDGE); addAction(ACT_CONFIG); addAction(ACT_RUN)
-                addAction(ACT_TYPING)
+                addAction(ACT_TYPING); addAction(ACT_YIELD)
             },
             Context.RECEIVER_EXPORTED,
         )
@@ -214,12 +216,30 @@ class EyesAndHands : AccessibilityService() {
             it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
         } == true
         val shown = Privileged.exec("dumpsys input_method | grep -m1 mInputShown").trim()
+        val noBridge = shown.startsWith("NO_BRIDGE") || shown.startsWith("EXEC_FAIL")
         val byShell = shown.contains("mInputShown=true")
         Log.i(TAG, "---- TYPING ----")
         Log.i(TAG, "  无障碍: $byA11y   (主屏窗口类型: $types)")
-        Log.i(TAG, "  IMMS  : $byShell  ($shown)")
-        Log.i(TAG, if (byA11y == byShell) "  两路一致 —— 判据可信"
-                   else "  两路不一致 —— 无障碍这条不能单独用,让路机制会走 IMMS 兜底")
+        Log.i(TAG, "  IMMS  : ${if (noBridge) "测不了" else "$byShell"}  ($shown)")
+        Log.i(TAG, when {
+            // 桥没连的时候 IMMS 那一路根本没读到东西,不能拿它去和无障碍比对 ——
+            // 那会报出一个假的「两路不一致」,比没有这条检查还糟。
+            noBridge      -> "  特权桥没连,IMMS 这一路测不了;只验证了无障碍那一路"
+            byA11y == byShell -> "  两路一致 —— 判据可信"
+            else          -> "  两路不一致 —— 无障碍这条不能单独用,让路机制会走 IMMS 兜底"
+        })
+    }
+
+    /**
+     * 直接测「闸门」本身:机主在打字时,agent 到底会不会停下来等。
+     *
+     * 单独测这一条的理由和 typingCheck 一样 —— 从整轮任务里反推不出来。
+     * 任务跑完发现键盘没被收起,可能是闸门起作用了,也可能是那一轮机主压根没打字。
+     */
+    private fun yieldCheck() {
+        Log.i(TAG, "---- YIELD ---- 开始等(机主在打字的话这里会卡住)")
+        val t = Conflict.yieldWhileOwnerTypes(this)
+        Log.i(TAG, "---- YIELD ---- 让了 $t 毫秒后放行")
     }
 
     private fun injectionCheck() {
@@ -275,6 +295,7 @@ class EyesAndHands : AccessibilityService() {
         const val ACT_TEXT  = "ai.whalephone.agent.TEXT"
         const val ACT_BRIDGE = "ai.whalephone.agent.BRIDGE"
         const val ACT_TYPING = "ai.whalephone.agent.TYPING"
+        const val ACT_YIELD = "ai.whalephone.agent.YIELD"
         const val ACT_CONFIG = "ai.whalephone.agent.CONFIG"
         const val ACT_RUN = "ai.whalephone.agent.RUN"
     }

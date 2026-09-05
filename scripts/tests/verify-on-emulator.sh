@@ -35,8 +35,16 @@ echo "== 准备 =="
 "$ADB" root >/dev/null 2>&1; naps 2
 "$ADB" install -r "$APK" 2>&1 | tr -d '\r' | tail -1
 "$ADB" push "$WROOT/probe/out3/classes.dex" $DEX >/dev/null 2>&1
-sh settings put secure enabled_accessibility_services "$SVC" >/dev/null 2>&1
-sh settings put secure accessibility_enabled 1 >/dev/null 2>&1
+# adb root 会重启 adbd,紧跟着的 settings put 会静默丢掉(实测:读回是 null)。
+# 写完必须读回来确认,不然后面整段都在测一个没启用的服务,而且看不出来。
+for _ in 1 2 3 4 5; do
+  sh settings put secure enabled_accessibility_services "$SVC" >/dev/null 2>&1
+  sh settings put secure accessibility_enabled 1 >/dev/null 2>&1
+  naps 2
+  [ "$(sh settings get secure enabled_accessibility_services)" = "$SVC" ] && break
+done
+[ "$(sh settings get secure enabled_accessibility_services)" = "$SVC" ] || {
+  echo "无障碍服务没启用起来,后面测不了"; exit 1; }
 naps 3
 
 echo
