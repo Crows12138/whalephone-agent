@@ -114,10 +114,21 @@ class AgentService : Service() {
     private fun startFeedIfAsked() {
         if (Config.get(this, KEY_DEMO_FEED) != "1") return
         val d = shared ?: run { Log.w(TAG, "开发模式下没有自己的副屏,取景窗开不了"); return }
+        // 同一时刻只该有一个取景线程。服务被反复 start 时,旧线程如果还活着,
+        // 会和新线程抢同一个文件 —— 而且它持有的可能是一块已经销毁的屏。
+        feed?.interrupt()
         feed = thread(name = "wp-feed") {
+            var blanks = 0
             while (!stopping && worker?.isAlive != false) {
-                runCatching { d.captureTo(FEED_PATH) }
-                Thread.sleep(700)
+                val ok = runCatching { d.captureTo(FEED_PATH) }.getOrDefault(false)
+                val n = runCatching { java.io.File(FEED_PATH).length() }.getOrDefault(0L)
+                // 纯黑的 1080x2340 PNG 只有十几 KB,正常界面是几百 KB 到 1 MB+。
+                // 取景窗黑掉过一次而我当时不知道,所以这里把它变成可观测的。
+                if (ok && n in 1..40_000) {
+                    if (blanks++ == 0) Log.w(TAG, "取景窗抓到近乎空白的一帧 屏=${d.displayId} $n 字节")
+                } else if (ok) blanks = 0
+                if (!ok) Log.v(TAG, "取景窗这一轮没有新帧")
+                runCatching { Thread.sleep(700) }.onFailure { return@thread }
             }
         }
         Log.i(TAG, "取景窗已开 -> $FEED_PATH")
@@ -145,7 +156,18 @@ class AgentService : Service() {
         stopSelf()
     }
 
-    override fun onDestroy() { shared?.release(); shared = null; super.onDestroy() }
+    /**
+     * 只有用户明确点了停止(stop() 里置 stopping)才销毁副屏。
+     *
+     * 这里原来是无条件 release —— 而 finish() 每个任务结束都会 stopSelf(),
+     * 于是「副屏跨任务复用」这条设计从来没生效过:每个任务都重造一次屏,
+     * 也就每个任务都让用户的输入法抖一次。这正是本项目声称要避免的那种打扰。
+     */
+    override fun onDestroy() {
+        if (stopping) { shared?.release(); shared = null }
+        feed = null
+        super.onDestroy()
+    }
 
     // ---- 通知 ----
 
