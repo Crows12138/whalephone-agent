@@ -5,7 +5,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import android.util.Log
+import android.util.SparseLongArray
 import android.view.accessibility.AccessibilityEvent
 
 private const val TAG = "WPEyes"
@@ -86,7 +88,29 @@ class EyesAndHands : AccessibilityService() {
         super.onDestroy()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    /**
+     * 每块屏最近一次界面变动的时刻。
+     *
+     * performAction(ACTION_CLICK) 返回 true 只说明节点收下了这个动作 —— 它走的是
+     * View.performClick(),只触发 OnClickListener。App 自己用 onTouchListener 处理
+     * 触摸时(淘宝商品页底栏就是这样),节点照样返回 true,界面纹丝不动。
+     * 一个动作有没有真的生效,只能看界面动没动 —— 这是唯一可靠的判据。
+     */
+    private val lastChange = SparseLongArray()
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val e = event ?: return
+        when (e.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED ->
+                synchronized(lastChange) { lastChange.put(e.displayId, SystemClock.uptimeMillis()) }
+        }
+    }
+
+    /** 从 [since] 起,这块屏的界面有没有动过 */
+    fun changedSince(displayId: Int, since: Long): Boolean =
+        synchronized(lastChange) { lastChange.get(displayId, 0L) > since }
     override fun onInterrupt() {}
 
     // ---- 广播处理 ----

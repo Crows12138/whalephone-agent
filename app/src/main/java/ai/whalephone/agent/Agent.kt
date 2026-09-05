@@ -24,6 +24,18 @@ class Agent(
     data class Outcome(val done: Boolean, val message: String, val trace: List<Step>)
 
     private val trace = mutableListOf<Step>()
+
+    /**
+     * 模型的草稿纸。
+     *
+     * 每一轮它只看得到「最近几步做了什么」和「这一帧长什么样」,更早的**观察**
+     * 是不进上下文的。实测的后果:在商品详情页第 6 步就读到了价格 799,往下滚
+     * 去找店铺名,价格滚出屏幕之后它又开始反复找价格,来回打转直到被判卡死。
+     *
+     * 让它把查到的事实显式记下来,后续每一轮都带上。这是长任务能不能收敛的关键 ——
+     * 不然模型永远只有一帧的记忆。
+     */
+    private val notes = mutableListOf<String>()
     private var pendingQuestion: String? = null
 
     /** 需要用户拍板时,回调出去(上层用通知承接,而不是弹窗抢屏) */
@@ -38,7 +50,15 @@ class Agent(
             val snap = hands.snapshot()
             val render = snap.render()
 
-            if (render == lastRender) sameCount++ else sameCount = 0
+            // performAction 返回 true 只代表节点收下了这个动作,不代表界面有反应。
+            // 界面到底动没动,只有这里比得出来 —— 而模型看不到这里。它的历史里
+            // 每一步都是「点了 [68]」这种成功记录,于是它会一直点下去,直到被判卡死,
+            // 全程不知道自己在原地踏步。把这个事实写回上一步的结果,让它下一轮就看见。
+            val idled = render == lastRender && trace.lastOrNull()?.action.let { it != null && it != "note" }
+            if (idled) {
+                sameCount++
+                trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "  ← 界面没有任何变化") }
+            } else sameCount = 0
             lastRender = render
             if (sameCount >= 3) {
                 return Outcome(false, "界面连续 4 步没有变化,判定卡住了", trace)
@@ -75,6 +95,11 @@ class Agent(
                     onAsk?.invoke(q)
                     return Outcome(false, "等待用户确认: $q", trace)
                 }
+                "note" -> {
+                    val v = act.optString("text")
+                    if (v.isNotBlank()) notes += v
+                    record(n, thought, name, "记下了:$v")
+                }
                 else -> record(n, thought, name, execute(name, act))
             }
         }
@@ -94,6 +119,7 @@ class Agent(
     }.also { Thread.sleep(600) }   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
 
     private fun record(n: Int, thought: String, action: String, result: String) {
+        Log.i(TAG, "     -> $result")
         val s = Step(n, thought, action, result)
         trace += s
         onStep?.invoke(s)
@@ -102,6 +128,11 @@ class Agent(
     private fun userTurn(n: Int, render: String): String = buildString {
         appendLine("目标:$goal")
         appendLine()
+        if (notes.isNotEmpty()) {
+            appendLine("已经查到的:")
+            notes.forEach { appendLine("  · $it") }
+            appendLine()
+        }
         if (trace.isNotEmpty()) {
             appendLine("已经做过的:")
             trace.takeLast(8).forEach { appendLine("  ${it.n}. ${it.action} -> ${it.result}") }
@@ -115,7 +146,7 @@ class Agent(
             appendLine("注意:你已经连续三步都在 ${last3[0].action},显然没有推进。换一个动作。")
             appendLine()
         }
-        appendLine("这是副屏第 $n 步的界面:")
+        appendLine("这是第 $n 步(最多 $maxSteps 步)。副屏当前界面:")
         append(render)
     }
 
@@ -155,6 +186,7 @@ class Agent(
               back        (无参数,只在副屏上返回)
               home        (无参数,回副屏自己的桌面;界面乱了就用它重来)
               wait        ms
+              note        text(把查到的事实记下来,后面每一轮都还看得到)
               done        summary(任务结果,说清楚查到/做成了什么)
               ask         question(需要主人拍板的事)
 
@@ -162,9 +194,16 @@ class Agent(
             - 序号只在当前这份列表里有效,每一步都会重新编号,不要用上一步的序号。
             - 你没有键盘,文字一律用 set_text 写进输入框。
             - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
-            - 界面连着几步没变,说明你的做法不起作用,换一个,别原地重复。
+            - 历史里标了「界面没有任何变化」的那步,是白做的 —— 元素收下了动作但什么也没发生。
+              再点一次结果一样。要么换个元素,要么换条路,要么承认这条路走不通。
             - 想往输入框里写字就直接 set_text。反复点同一个元素等它「变成输入状态」是没用的。
             - 副屏上可能还停着上一个任务留下的界面。不确定自己在哪就先 home,再 launch。
+            - 一屏放不下的信息,看到一条就先 note 一条再往下翻。你每一轮只看得见当前这一帧,
+              滚走了就没了 —— 靠回头再找会原地打转。
+            - 目标里有几项而某一项确实找不到时,把找到的 note 下来,然后 done,
+              在 summary 里说清楚哪项没拿到、你试过什么。**无限找下去是最差的结果**:
+              用户拿到「价格是 799,店铺名没找到」是有用的,拿到「卡住了」是没用的。
+            - 留意步数。过了一半还没接近目标,就该考虑换路子或者带着已有结果收尾。
             - 目标达成就立刻 done,不要多点。
         """.trimIndent()
     }

@@ -26,7 +26,7 @@ REMOTE = "/sdcard/Download/wp_vd.png"
 LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".feed.png")
 PORT = 8080
 
-PAGE = b"""<!doctype html><meta charset=utf-8><title>agent 副屏</title>
+PAGE = """<!doctype html><meta charset=utf-8><title>agent 副屏</title>
 <style>
  body{margin:0;background:#111;display:flex;align-items:center;justify-content:center;height:100vh}
  img{max-height:100vh;max-width:100vw;object-fit:contain}
@@ -37,7 +37,7 @@ PAGE = b"""<!doctype html><meta charset=utf-8><title>agent 副屏</title>
 <script>
  setInterval(()=>{document.getElementById('v').src='/f.png?'+Date.now()},400)
 </script>
-"""
+""".encode("utf-8")   # 页面里有中文,不能写成字节串字面量
 
 
 def puller():

@@ -2,6 +2,8 @@ package ai.whalephone.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.graphics.Rect
+import android.os.SystemClock
 import android.util.Log
 
 /**
@@ -29,9 +31,31 @@ class Hands(
 
     private fun el(i: Int) = last?.byIndex(i)
 
+    /**
+     * 两级降级,和 setText 一样不信返回值 —— 只信界面动没动:
+     *   1. ACTION_CLICK   —— 标准控件都吃这套,而且不产生任何真实触摸事件
+     *   2. 往这块屏注入一次真实点击 —— 只挂了 onTouchListener 的自定义控件只认这个。
+     *      带 `-d 屏号`,事件进的是 agent 这块屏的 InputDispatcher,到不了用户那块屏。
+     *
+     * 没有第二级的时候,模型会对着一个「点了返回 true 但什么也不会发生」的按钮
+     * 一直点到被判卡死 —— 它拿不到任何失败信号。实测淘宝商品详情页的店铺入口就是。
+     */
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
-        return if (Actions.click(e)) "已点击 [$i] ${e.label()}" else "点击 [$i] 失败"
+        val t = SystemClock.uptimeMillis()
+        val ok = Actions.click(e)
+        Thread.sleep(CLICK_SETTLE_MS)
+        val eyes = svc as? EyesAndHands
+        if (ok && (eyes == null || eyes.changedSince(displayId, t)))
+            return "已点击 [$i] ${e.label()}"
+
+        val b = Rect().also { e.node.getBoundsInScreen(it) }
+        if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点击 [$i] 失败"
+        Privileged.exec("input -d $displayId tap ${b.centerX()} ${b.centerY()}")
+        Thread.sleep(CLICK_SETTLE_MS)
+        return if (eyes == null || eyes.changedSince(displayId, t))
+            "已点击 [$i] ${e.label()}(无障碍点击无效,补了一次真实触摸)"
+        else "点了 [$i] ${e.label()},但界面没有任何反应 —— 这个元素点不动,换一个"
     }
 
     fun longClick(i: Int): String {
@@ -134,6 +158,8 @@ class Hands(
     companion object {
         private const val TAG = "WPHands"
         private const val LAUNCH_TIMEOUT_MS = 25_000L
+        /** 点完等界面反应的时间。太短会把「慢」误判成「点不动」而多补一次触摸。 */
+        private const val CLICK_SETTLE_MS = 500L
     }
 }
 

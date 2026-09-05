@@ -53,11 +53,13 @@ class AgentDisplay private constructor(
         }
     }
 
+    /** 先写临时文件再改名。直接写目标文件的话,外面拉取时会撞上写了一半的 PNG。 */
     fun captureTo(path: String): Boolean {
         val bmp = capture() ?: return false
         return runCatching {
-            FileOutputStream(File(path)).use { bmp.compress(Bitmap.CompressFormat.PNG, 90, it) }
-            true
+            val tmp = File("$path.tmp")
+            FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.PNG, 90, it) }
+            tmp.renameTo(File(path))
         }.getOrDefault(false)
     }
 
