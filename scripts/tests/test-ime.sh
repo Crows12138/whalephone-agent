@@ -66,10 +66,16 @@ sh logcat -d -s WPAgent:* | grep -oE "第 [0-9]+ 步 [a-z_]+" | tr '\n' ' '; ech
 sh logcat -d -s WPSvc:* | grep "结束 done=" | sed -E 's/.*WPSvc  : /   /'
 
 echo
+# 让路机制到底有没有触发。DROPS=0 但一次都没让过,说明这次机主根本没打字,
+# 测试没测到东西 —— 那是「没测出来」,不是「解决了」,两者必须分得开。
+YIELDS=$(sh logcat -d -s WPConflict:* 2>/dev/null | grep -c "机主在打字")
 ANRS=$(sh logcat -d -b events 2>/dev/null | grep -c "am_anr")
 echo "== 结论 =="
 echo "   期间 ANR 次数        $ANRS   (要求 0)"
 echo "   输入法被收起次数    $DROPS   (要求 0)"
+echo "   agent 主动让路次数  $YIELDS   (为 0 说明这次机主没打字,这轮测试无效)"
 echo "   焦点不在主屏的采样  $STEAL 次 (要求 0;短暂离开随即还回来也会被采到)"
 echo "   最终 mInputShown=$(ime)  焦点屏=$(focus)"
-[ "$DROPS" -eq 0 ] && echo "   机主的键盘全程没被动过 ✓" || echo "   机主的键盘被打断了 ✗"
+if [ "$YIELDS" -eq 0 ]; then echo "   这轮不算数:agent 一次都没让过,说明机主全程没打字"
+elif [ "$DROPS" -eq 0 ]; then echo "   机主的键盘全程没被动过 ✓"
+else echo "   机主的键盘被打断了 ✗"; fi
