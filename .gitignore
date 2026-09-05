@@ -2,6 +2,7 @@
 # 构建产物
 # 设备现场备份,和具体手机绑定
 # 运行期临时文件
+.avd.log
 .backup/
 .build.log
 .build.log
@@ -10,6 +11,8 @@
 .f.log
 .gradle/
 .hold.log
+.mkavd.bat
+.runavd.bat
 .scratch/
 .sdkimg.log
 .sdkinstall.log
