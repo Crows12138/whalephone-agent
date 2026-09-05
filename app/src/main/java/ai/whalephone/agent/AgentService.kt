@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.util.Log
 import kotlin.concurrent.thread
@@ -64,6 +65,17 @@ class AgentService : Service() {
             // 副屏跨任务复用。造屏那一下会收起用户的输入法(虽然随后立刻还了回去,
             // 但仍是一次可感知的抖动),每个任务重造一次就是每个任务抖一次。
             // 造一次留着,只在用户明确停止时销毁。
+            // 副屏是特权桥那个进程持有的。Shizuku 重启、或者桥被系统回收之后,
+            // 屏就没了,但 app 这边的 AgentDisplay 对象还在 —— 它会拿着一个幽灵屏号
+            // 继续跑,`am start --display N` 报的是 Permission Denial,看着像权限问题,
+            // 其实是对象已经不在了。复用之前先问系统这块屏还在不在。
+            shared?.let { old ->
+                if (getSystemService(DisplayManager::class.java)?.getDisplay(old.displayId) == null) {
+                    Log.w(TAG, "副屏 ${old.displayId} 已经不存在了(特权桥重启过?),重造一块")
+                    runCatching { old.release() }
+                    shared = null
+                }
+            }
             val d = shared ?: AgentDisplay.create(
                 resources.displayMetrics.widthPixels,
                 resources.displayMetrics.heightPixels,
