@@ -104,3 +104,14 @@ shell 侧的动作:
     adb uninstall ai.whalephone.agent
     adb shell settings put global stay_on_while_plugged_in 0
     bash scripts/vd2.sh stop
+
+## 两条踩过的坑
+
+**后台跑着的 shell 脚本不能改。** bash 是按字节偏移增量读脚本的:一边跑一边改,
+它会从一个陈旧的偏移继续读下去,正好落在多字节汉字中间。现象是脚本跑到一半开始
+报一串莫名其妙的 `command not found`,而文件本身 `bash -n` 完全正常,查半天查不出。
+要改就先停。
+
+**模拟器跑久了会自己坏,而且坏得像被测代码的错。** 连着跑几十轮任务之后软键盘
+叫不起来;`dumpsys input_method` 里堆着几十个历史虚拟屏留下的 `ClientState`。
+重启模拟器再跑 `scripts/tests/emu-setup.sh` 即恢复。
