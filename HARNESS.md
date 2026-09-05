@@ -105,7 +105,7 @@ shell 侧的动作:
     adb shell settings put global stay_on_while_plugged_in 0
     bash scripts/vd2.sh stop
 
-## 两条踩过的坑
+## 踩过的坑
 
 **后台跑着的 shell 脚本不能改。** bash 是按字节偏移增量读脚本的:一边跑一边改,
 它会从一个陈旧的偏移继续读下去,正好落在多字节汉字中间。现象是脚本跑到一半开始
@@ -115,3 +115,16 @@ shell 侧的动作:
 **模拟器跑久了会自己坏,而且坏得像被测代码的错。** 连着跑几十轮任务之后软键盘
 叫不起来;`dumpsys input_method` 里堆着几十个历史虚拟屏留下的 `ClientState`。
 重启模拟器再跑 `scripts/tests/emu-setup.sh` 即恢复。
+
+**「键盘弹起来了」不等于「注入进得去」。** Edge 地址栏点下去 `mInputShown=true`,
+但输入焦点没落在 `url_bar` 上(dump 里 `focused="false"`),之后所有 `input text`
+都打了水漂,而脚本以为准备就绪。`raise_ime` 现在要求「有一个获焦的可编辑控件」,
+不满足就换下一个载体。
+
+**机主用讯飞拼音,`input text x` 不落字。** 按键只进了输入法的拼音串,候选栏在动,
+输入框的文本一个字都没变。要模拟「敲一下」必须带上提交:`owner_types()`
+= `input text` + `keyevent 62`(空格)。两轮读数因此白测。
+
+**这台机器上后台线程的 `Thread.sleep(500)` 最长被拖到 37 秒。** 凡是靠墙上时钟
+判定的断言都会随机过或不过。断言要卡被测代码自己算出来的量(绝对时间戳相减),
+不要卡「这段代码跑了多久」。

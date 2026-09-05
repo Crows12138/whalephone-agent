@@ -15,45 +15,71 @@ vdid() { sh dumpsys display | grep -oE "^  mDisplayId=[0-9]+" | grep -oE "[0-9]+
 foc()  { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-9]+"; }
 ime()  { sh dumpsys input_method | grep -oE "mInputShown=[a-z]+|mDisplayIdToShowIme=[0-9]+" | tr '\n' ' '; }
 
-# 把机主的真实输入法叫出来,返回 0 = 叫起来了。
+# 把机主的真实输入法叫出来,并且**光标真的落在一个可编辑控件里**。返回 0 = 成功。
 #
-# 为什么用 uiautomator dump 而不是本 app 的 SNAP/CLICK 广播:那两个广播要求
-# 无障碍服务已经在跑,而无障碍恰恰是被测对象之一。用被测对象搭测试脚手架,
-# 它一坏,测出来的是「准备失败」而不是「功能坏了」,两者分不开。
-# uiautomator 走的是另一条独立通路,不吃这个依赖。
+# 为什么不能只看 mInputShown=true:真机上 Edge 的地址栏点下去键盘弹了,但输入焦点
+# 没落在 url_bar 上(dump 里 focused="false")。此后所有注入都打了水漂,而脚本
+# 以为准备就绪 —— 读数依然漂亮,测的却是空气。所以成功的判据是「有一个获焦的
+# 可编辑控件」,不是「键盘露头了」。
 #
-# 载体优先用 Edge,没有就用系统设置的搜索框(模拟器上一定有)。
-# 不用本 app 自己的输入框:焦点被挪走时前台 app 会「Input dispatching timed out」
-# 而 ANR,ANR 对话框自己也会带走键盘 —— 拿会被待测现象弄坏的东西当载体,
-# 量出来的掉落分不清是谁造成的。
-raise_ime() {
-  local B
-  if sh pm path com.microsoft.emmx | grep -q package; then
-    sh dumpsys activity activities | grep -m1 topResumedActivity | grep -q emmx || {
-      sh am start --display 0 -n com.microsoft.emmx/com.microsoft.ruby.Main >/dev/null 2>&1
-      python -c "import time;time.sleep(5)"; }
-  else
-    sh am start --display 0 -a android.settings.SETTINGS >/dev/null 2>&1
-    python -c "import time;time.sleep(4)"
-  fi
-  # 循环三次是因为有的载体要两跳:系统设置首页的搜索条只是个 TextView,
-  # 点开之后才出现真正的 EditText,键盘也是那时候才弹。
-  for _ in 1 2 3; do
-    sh uiautomator dump /sdcard/wp.xml >/dev/null 2>&1
-    "$ADB" shell cat /sdcard/wp.xml 2>/dev/null | tr '<' '
+# 载体按顺序试:Edge、系统设置的搜索。不用本 app 自己的输入框:焦点被挪走时
+# 前台 app 会「Input dispatching timed out」而 ANR,ANR 对话框自己也会带走键盘 ——
+# 拿会被待测现象弄坏的东西当载体,量出来的掉落分不清是谁造成的。
+#
+# 也不用本 app 的 SNAP/CLICK 广播找输入框:那要求无障碍已经在跑,而无障碍恰恰是
+# 被测对象之一。用被测对象搭测试脚手架,它一坏,测出来的是「准备失败」而不是
+# 「功能坏了」。uiautomator 走的是另一条独立通路,不吃这个依赖。
+dumpui() {
+  sh uiautomator dump /sdcard/wp.xml >/dev/null 2>&1
+  "$ADB" shell cat /sdcard/wp.xml 2>/dev/null | tr '<' '
 ' > "$UIDUMP"
+}
+
+# 此刻有没有一个获焦的可编辑控件 —— 注入进不进得去,全看这一条
+focused_editor() {
+  grep -E 'focused="true"' "$UIDUMP" | grep -qE 'class="[^"]*(EditText|AutoCompleteTextView)"'
+}
+
+# 在当前这个 app 里找输入框点进去。循环三次是因为有的载体要两跳:
+# 系统设置首页的搜索条只是个 TextView,点开之后才出现真正的 EditText。
+_poke_editor() {
+  local B
+  for _ in 1 2 3; do
+    dumpui
+    focused_editor && sh dumpsys input_method | grep -q "mInputShown=true" && return 0
     # 先找有名字的输入框,找不到再退回「页面上第一个 EditText」。
     # 只按 search 之类的关键字匹配会命中整屏的 FrameLayout,点了不弹键盘。
-    B=$(grep -iE 'resource-id="[^"]*(url_bar|search_box|location_bar|search_src_text|search_action_bar|search_bar_title)"' "$UIDUMP" | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '
+    B=$(grep -iE 'resource-id="[^"]*(url_bar|search_box|location_bar|search_src_text|search_action_bar|search_plate|search_bar_title)"' "$UIDUMP"         | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '
 ' ' ')
-    [ -z "$B" ] && B=$(grep -F 'class="android.widget.EditText"' "$UIDUMP" | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '
+    [ -z "$B" ] && B=$(grep -F 'class="android.widget.EditText"' "$UIDUMP"         | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '
 ' ' ')
     [ -n "$B" ] && { set -- $B
       sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null 2>&1
       python -c "import time;time.sleep(2.5)"; }
-    sh dumpsys input_method | grep -q "mInputShown=true" && return 0
   done
-  return 1
+  dumpui
+  focused_editor && sh dumpsys input_method | grep -q "mInputShown=true"
+}
+
+raise_ime() {
+  if sh pm path com.microsoft.emmx | grep -q package; then
+    sh am start --display 0 -n com.microsoft.emmx/com.microsoft.ruby.Main >/dev/null 2>&1
+    python -c "import time;time.sleep(5)"
+    _poke_editor && return 0
+  fi
+  sh am start --display 0 -a android.settings.SETTINGS >/dev/null 2>&1
+  python -c "import time;time.sleep(4)"
+  _poke_editor
+}
+
+# 让机主「敲一下」。**必须带上提交那一步**。
+#
+# 机主用的是讯飞拼音:`input text x` 只是把 x 送进输入法的拼音串,候选栏在动,
+# 输入框的文本一个字都没变 —— 真机上为此白测了两轮。空格提交当前候选,
+# 没有候选时就落一个空格,两种情况下输入框的内容都会变。
+owner_types() {
+  sh input -d 0 text "${1:-x}" >/dev/null 2>&1
+  sh input -d 0 keyevent 62 >/dev/null 2>&1
 }
 
 # 给 app 发广播。必须带 -p。

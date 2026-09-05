@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 
 /**
@@ -28,7 +29,9 @@ class Hands(
     private val clipboard = ClipboardGuard(ctx)
     // 副屏是按物理屏尺寸造的(AgentService 用的就是这份 metrics),所以可以直接拿来当屏幕手势的画布
     private val metrics = ctx.resources.displayMetrics
-    private var last: Perception.Snapshot? = null
+    /** 最近一帧快照。动作实现要拿它判断「这个动作在当前界面上有没有意义」。 */
+    var last: Perception.Snapshot? = null
+        private set
 
     fun snapshot(): Perception.Snapshot {
         val s = svc.snapshotOf(displayId)
@@ -407,13 +410,145 @@ object Conflict {
         userForegroundPackage(svc) == pkg
 
     /**
-     * 机主此刻是不是正在打字 —— 判据是**他那块屏上有没有输入法窗口**。
+     * 机主此刻是不是正在打字。两半都要成立:
      *
-     * 不用 `dumpsys input_method` 的 mInputShown:那是 IMMS 的全局状态,没有显示器维度,
-     * 而且每次都要一趟 shell 往返,这个判断在每个动作前都要做。无障碍的窗口列表本来
-     * 就是按显示器分的,问的正好是要问的那件事。
+     *   状态 —— 他那块屏上有一个为他而开的输入法窗口([imeUpForOwner])
+     *   活动 —— 最近确实有键落下([ownerStillAtIt])
+     *
+     * 少了任何一半,判据都会在一头出错;为什么,分别写在那两个函数上。
      */
     fun ownerTyping(svc: AccessibilityService): Boolean {
+        val a = SystemClock.uptimeMillis()
+        val up = imeUpForOwner(svc)
+        val b = SystemClock.uptimeMillis()
+        if (b - a > tIme) tIme = b - a
+        if (!up) return false
+        val r = ownerStillAtIt(svc)
+        val c = SystemClock.uptimeMillis()
+        if (c - b > tFp) tFp = c - b
+        return r
+    }
+
+    // 判据两半各自最慢的一次(毫秒)。让路时长比阈值多出来的部分,要能指到具体是谁慢。
+    private var tIme = 0L
+    private var tFp = 0L
+
+    /**
+     * 机主还在敲吗 —— 让路判据的**活动**那一半。
+     *
+     * 「主屏上有输入法窗口」是状态,「机主在打字」是活动。只看状态,判据在两头都是错的:
+     * 机主把键盘留在屏上走开,agent 会一直认为他在打字,每轮让满上限、一步都做不了;
+     * 而机主连续打字超过那个上限时,等满之后照样会动手打断他 —— 上限这个补丁本身
+     * 就是判据分不出活动与状态的证据。补上活动维度,两头才都对。
+     *
+     * 活动信号是**直接读他正在编辑的那个输入框**:内容或光标位置变了 = 有键落下。
+     *
+     * 走过一次弯路:先用的是无障碍事件流里的 `TYPE_VIEW_TEXT_CHANGED`。真机上量出来,
+     * 往 Edge 地址栏打字**一条文本变化事件都不发**,只有 `TYPE_WINDOW_CONTENT_CHANGED`
+     * (那条不能用 —— 主屏上时钟、通知、动画都会发,活动判定会永远为真)。
+     * 事件发不发是 App 自己的选择,读节点不是:节点上的文本和选区是无障碍树里的状态,
+     * 拿不到就是真的拿不到,不会「有内容但不通知」。
+     *
+     * 不用 `dumpsys power` 的 `mLastUserActivityTime`,也不用 `dumpsys input` 的事件
+     * 时间戳:agent 自己会往主屏注入 `keyevent 0` 把焦点推回去,那些注入会刷新这两个
+     * 计数器,判据会一直以为机主在动。读输入框没有这个自污染 —— agent 的动作全在副屏。
+     *
+     * **读不到输入框时,一律按「在打字」算。** 这条不能省:读不到时如果按「没人打字」
+     * 算,让路会彻底失效,而日志一片正常、指标一片漂亮。这个项目已经在静默失效上
+     * 栽过两次(数「字有没有丢」、TYPING 探针自己重算判据),宁可退回只看状态的旧行为。
+     *
+     * 阈值是个取舍,如实说清:20 秒里输入框一动不动,更像是人走开了而不是在措辞。
+     * 判错的代价是键盘被收起一次(草稿还在,点回输入框能接着打);不判的代价是
+     * agent 在这种状态下完全不工作。可以用 TYPING_IDLE_MS 调。
+     */
+    private fun ownerStillAtIt(svc: AccessibilityService): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val fp = ownerEditorFingerprint(svc)
+        if (fp == null) {                       // 读不到 —— 退回只看窗口状态
+            fpReadable = false; fpLast = null; nBlind++; return true
+        }
+        fpReadable = true
+        if (fp != fpLast) {                     // 指纹变了 = 刚有键落下
+            fpLast = fp; fpChangedAt = now; idleLogged = false; nFp++; return true
+        }
+        if (fpChangedAt == 0L) { fpChangedAt = now; return true }
+        // 第二个检测器:机主那块屏上的**窗口结构**变过。
+        //
+        // 光看指纹漏掉一种情况,而且是真机上撞出来的:上一轮让路结束时输入框是空的,
+        // 机主收起键盘、又重新点进同一个空输入框 —— 指纹一模一样,判据当场判他
+        // 「早就停手了」,一秒没让。他确实动了,只是动作没落在文本上。
+        //
+        // 键盘弹起、对话框出现、切 App,都会让无障碍报一次 TYPE_WINDOWS_CHANGED,
+        // 而这些都是机主在操作。这条信号由框架发出,不靠 App 配合 —— 和文本变化
+        // 事件不一样(Edge 地址栏就一条都不发)。机主真走开时主屏是静的,不会误触发。
+        val winAt = EyesAndHands.instance?.ownerWindowsChangedAt ?: 0L
+        if (winAt > fpChangedAt) {
+            fpChangedAt = winAt; idleLogged = false; nWin++; return true
+        }
+        val idle = now - fpChangedAt
+        if (idle < idleMs(svc)) return true
+        if (!idleLogged) {
+            idleLogged = true
+            Log.i("WPConflict", "键盘还开着,但输入框 ${idle / 1000} 秒没动过 —— 按机主已经停手算")
+        }
+        return false
+    }
+
+    /**
+     * 机主此刻在编辑的那个输入框的「内容指纹」:文本 + 选区。读不到返回 null。
+     *
+     * 选区也要算进去:光标移动、选中一段、删到空,都是他在操作,而这些不一定改变文本。
+     */
+    private fun ownerEditorFingerprint(svc: AccessibilityService): String? = runCatching {
+        // 不挑「那个 isFocused 的窗口」,而是把主屏上的非输入法窗口挨个问一遍
+        // 「你里面有拿着输入焦点的节点吗」。
+        //
+        // 挑窗口这条路真机上会间歇性地什么都读不到:讯飞的候选窗口有时自己是
+        // isFocused,把它排掉之后就找不到别的获焦窗口了,指纹变成 null ——
+        // 而 null 按设计要退回「只看状态」,于是让路又变成等满上限。
+        // 现象是让路时长忽长忽短,而两个检测器的计数都是 0,看不出原因。
+        // 拿着输入焦点的节点全系统同一时刻只有一个,不必先猜它在哪个窗口里。
+        val wins = svc.windowsOnAllDisplays.get(USER_DISPLAY) ?: return null
+        for (w in wins) {
+            if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val node = w.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: continue
+            return "${node.text}|${node.textSelectionStart}|${node.textSelectionEnd}"
+        }
+        null
+    }.getOrNull()
+
+    private var fpLast: String? = null
+    private var fpChangedAt = 0L
+
+    /** 上一次判据到底读没读到输入框。读不到时让路上限要退回保守值。 */
+    @Volatile private var fpReadable = false
+
+    /** 这台机器上活动信号能不能用。用不了就退回只看状态。 */
+    private fun signalArmed() = fpReadable
+
+    private fun idleMs(svc: AccessibilityService): Long =
+        Config.get(svc, "TYPING_IDLE_MS", "20000").toLongOrNull() ?: 20_000L
+
+    /** 只打一次「按停手算」的日志,免得 500 毫秒一轮刷屏 */
+    @Volatile private var idleLogged = false
+
+    // 这一轮让路里,两个检测器各自把空闲计时重置了多少次。
+    // 只在让路结束时报一次 —— 让路等了多久之外还得能看出「是被什么一直推后的」,
+    // 否则等久了只能猜。逐次打日志的话机主连打一分钟就是上百行。
+    private var nFp = 0
+    private var nWin = 0
+    private var nBlind = 0
+
+    /** 给 TYPING 探针看的:活动信号这一路此刻是什么状况。只读,不改判据的状态。 */
+    fun activityStatus(svc: AccessibilityService): String {
+        val fp = ownerEditorFingerprint(svc)
+            ?: return "读不到机主的输入框 —— 空闲判定不启用,退回只看窗口状态"
+        val idle = if (fpChangedAt == 0L) -1 else (SystemClock.uptimeMillis() - fpChangedAt) / 1000
+        return "输入框可读(${fp.take(40)}),距上次变化 ${if (idle < 0) "还没测过" else "$idle 秒"}"
+    }
+
+    /** 判据的**状态**那一半:机主那块屏上有没有一个为他而开的输入法窗口。 */
+    private fun imeUpForOwner(svc: AccessibilityService): Boolean {
         val byA11y = runCatching {
             svc.windowsOnAllDisplays.get(USER_DISPLAY)
                 ?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
@@ -458,9 +593,18 @@ object Conflict {
      * 判不出来的时候按「是机主的」算:守着比放过安全。
      */
     private fun imeServesUs(svc: AccessibilityService): Boolean = runCatching {
-        val focused = svc.windowsOnAllDisplays.get(USER_DISPLAY)
-            ?.firstOrNull { it.isFocused && it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
-        focused?.root?.packageName?.toString() == svc.packageName
+        // 找法和 ownerEditorFingerprint 一致:先认「里面有拿着输入焦点的节点」的那个窗口,
+        // 找不到再退回 isFocused。只按 isFocused 挑会间歇性挑空(讯飞的候选窗口有时
+        // 自己就是 isFocused),挑空之后这里返回 false = 「这键盘是机主的」——
+        // 于是机主刚在本 app 里打完任务、点下开始,又被自己的键盘挡住。
+        val wins = svc.windowsOnAllDisplays.get(USER_DISPLAY) ?: return false
+        val holder = wins.firstOrNull {
+            it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                it.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) != null
+        } ?: wins.firstOrNull {
+            it.isFocused && it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+        } ?: return false
+        holder.root?.packageName?.toString() == svc.packageName
     }.getOrDefault(false)
 
     /**
@@ -479,14 +623,40 @@ object Conflict {
      * 不如等够了就做,并把让了多久如实写进这一步的结果里 —— 让不让、让多久,
      * 是应该被看见的行为,不是应该被藏起来的实现细节。
      */
-    fun yieldWhileOwnerTypes(svc: AccessibilityService, timeoutMs: Long = 60_000): Long {
+    fun yieldWhileOwnerTypes(svc: AccessibilityService, timeoutMs: Long = 0): Long {
+        idleLogged = false; nFp = 0; nWin = 0; nBlind = 0; tIme = 0; tFp = 0
         if (!ownerTyping(svc)) return 0
+        // timeoutMs = 0 表示由这里决定上限,取决于「键落下」这个信号能不能用:
+        //   能用 —— 正常出口是机主停手,上限只是信号出意外时的兜底,可以放得很宽,
+        //           这样机主连续打十分钟就让十分钟,不会到点被打断。
+        //   不能用 —— 判据退回只看状态,上限就是唯一的出口,只能维持原来的 60 秒。
+        val cap = when {
+            timeoutMs > 0 -> timeoutMs
+            signalArmed() -> 300_000L
+            else -> 60_000L
+        }
         val t0 = SystemClock.uptimeMillis()
         // 500 毫秒一轮:走 shell 兜底那条路时每轮是一次 dumpsys,不能太密;
         // 而机主打完字到 agent 恢复晚半秒,没有任何影响。
-        while (ownerTyping(svc) && SystemClock.uptimeMillis() - t0 < timeoutMs) Thread.sleep(500)
+        var polls = 0
+        var tSleep = 0L
+        while (ownerTyping(svc) && SystemClock.uptimeMillis() - t0 < cap) {
+            polls++
+            val a = SystemClock.uptimeMillis(); Thread.sleep(500)
+            val d = SystemClock.uptimeMillis() - a; if (d > tSleep) tSleep = d
+        }
         val waited = SystemClock.uptimeMillis() - t0
-        Log.i("WPConflict", "机主在打字,让了 $waited 毫秒")
+        // 到点了他还在打,那这一下就是实打实的打扰。必须能在日志里一眼看见,
+        // 不能和「他停手了我才动」混成同一条。
+        val why = if (ownerTyping(svc)) "等到 ${cap / 1000} 秒上限,他还在打 —— 这一下会打断他"
+                  else "机主停手了,输入框已经 ${SystemClock.uptimeMillis() - fpChangedAt} 毫秒没动"
+        // 卡顿信息只在真卡了的时候才打。它是为了把「让得久」和「跑得慢」分开 ——
+        // 探针路径上量到过 sleep(500) 实际睡 37 秒(没有前台服务时三星会限调度),
+        // 不分开的话让路时长忽长忽短,会被当成判据出了问题去查。
+        val slow = if (tSleep > 1_500 || tIme > 500 || tFp > 500)
+            ";这一轮被调度拖慢了 看键盘 $tIme/看输入框 $tFp/睡 500 实际 $tSleep 毫秒" else ""
+        Log.i("WPConflict", "机主在打字,让了 $waited 毫秒($why;轮询 $polls 次," +
+            "输入框变了 $nFp 次,主屏窗口变了 $nWin 次,读不到输入框 $nBlind 次$slow)")
         return waited
     }
 

@@ -107,12 +107,21 @@ class EyesAndHands : AccessibilityService() {
     /** 事件追踪开关,只在 CONFIG 广播时更新,不在事件回调里查配置 */
     @Volatile private var trace = false
 
+    /** 机主那块屏上最近一次窗口增删/变化的时刻。见 Conflict.ownerStillAtIt。 */
+    @Volatile var ownerWindowsChangedAt = 0L
+        private set
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
         // 这个回调跑在主线程上,而且滚动一个信息流就是成百上千次。
         // 这里做的任何事都得是常数级的 —— 原来每次都读一遍 SharedPreferences,
         // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
         if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${AccessibilityEvent.eventTypeToString(e.eventType)}")
+        // 机主那块屏上窗口结构变过 —— 让路判据拿它当「机主动过」的第二个检测器
+        // (第一个是输入框指纹)。为什么需要两个,见 Conflict.ownerStillAtIt。
+        if (e.displayId == Conflict.USER_DISPLAY &&
+            e.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED)
+            ownerWindowsChangedAt = SystemClock.uptimeMillis()
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
@@ -227,7 +236,10 @@ class EyesAndHands : AccessibilityService() {
         Log.i(TAG, "  判据结论: $verdict   ← 让路机制真正用的就是这个")
         Log.i(TAG, "  原始信号 无障碍: $byA11y   (主屏窗口类型: $types)")
         Log.i(TAG, "  原始信号 IMMS  : ${if (noBridge) "测不了" else "$byShell"}  ($shown)")
-        if (byA11y && !verdict) Log.i(TAG, "  主屏有输入法窗口,但它服务的是本 app 自己的输入框,不算打扰")
+        Log.i(TAG, "  原始信号 活动  : ${Conflict.activityStatus(this)}")
+        if (byA11y && !verdict) Log.i(TAG,
+            "  主屏有输入法窗口,判据仍然是 false —— 要么它服务的是本 app 自己的输入框," +
+                "要么机主已经很久没动那个输入框了")
         Log.i(TAG, when {
             // 桥没连的时候 IMMS 那一路根本没读到东西,不能拿它去和无障碍比对 ——
             // 那会报出一个假的「两路不一致」,比没有这条检查还糟。

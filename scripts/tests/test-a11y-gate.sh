@@ -215,8 +215,15 @@ naps 2
 if raise_ime; then
   sh logcat -c
   bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+  # 全程真的在敲,不是把键盘顶着。
+  #
+  # 判据现在要求「键盘弹着**且**输入框最近在变」—— 只顶着键盘不打字,20 秒后
+  # 就被判成「机主已经走开」,agent 照常开工,这一条测不到要测的东西。
+  # 改之前这里恰好是绿的,因为旧判据只看键盘在不在。
   BAILED=no
-  for _ in $(seq 1 115); do
+  T0=$(date +%s)
+  while [ $(( $(date +%s) - T0 )) -lt 215 ]; do
+    owner_types
     naps 2
     sh logcat -d -s WPSvc:* | grep -q "收工: 机主一直在打字" && { BAILED=yes; break; }
   done

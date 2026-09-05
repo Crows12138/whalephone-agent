@@ -67,9 +67,19 @@ echo "== 开始采样(任务已经在跑,键盘已经弹着)=="
 # 所以只在前 TYPING_S 秒保持弹出,之后自己收掉;判定只看这段窗口内的掉落。
 TYPING_S="${TYPING_S:-45}"
 T0=$(date +%s)
-DROPS=0; AFTER=0; STEAL=0; PREV=true; CLOSED=0
+DROPS=0; AFTER=0; STEAL=0; PREV=true; CLOSED=0; LASTK=-9; KEYS=0
 for i in $(seq 1 600); do
   NOW=$(( $(date +%s) - T0 ))
+  # 这段窗口里**真的往主屏敲字**,不是把键盘顶在那儿不动。
+  #
+  # 原来就是只顶着键盘、一个字不打。旧判据只看「主屏上有没有输入法窗口」,
+  # 这么测和真打字没区别,所以一直没发现。判据补上活动维度之后,
+  # 「键盘开着但没人敲」恰恰是**机主已经走开**那个场景 —— agent 按设计会开工,
+  # 而脚本会把这个正确行为记成一次打扰。
+  # 要测「打字期间不打扰机主」,脚本就得真的在打字。
+  if [ "$CLOSED" = "0" ] && [ $((NOW - LASTK)) -ge 3 ]; then
+    owner_types; LASTK=$NOW; KEYS=$((KEYS+1))
+  fi
   if [ "$CLOSED" = "0" ] && [ "$NOW" -ge "$TYPING_S" ]; then
     echo "   [${NOW}s] 机主打完字,自己收起键盘(之后的掉落不算 agent 头上)"
     # 用返回键收键盘,不用 ESC:讯飞对 keyevent 111 没反应(真机实测),
@@ -102,11 +112,13 @@ YIELDS=$(sh logcat -d -s WPConflict:* 2>/dev/null | grep -c "机主在打字")
 ANRS=$(sh logcat -d -b events 2>/dev/null | grep -c "am_anr")
 echo "== 结论 =="
 echo "   期间 ANR 次数        $ANRS   (要求 0)"
+echo "   机主实际敲下的字数  $KEYS   (为 0 说明这轮根本没在打字,读数不作数)"
 echo "   打字期间键盘被收起  $DROPS   (要求 0 —— 这一项才是「有没有打扰机主」)"
 echo "   打字结束后被收起    $AFTER  (不算 agent 头上,机主已经不在打字了)"
 echo "   agent 主动让路次数  $YIELDS   (为 0 说明这次机主没打字,这轮测试无效)"
 echo "   焦点不在主屏的采样  $STEAL 次 (要求 0;短暂离开随即还回来也会被采到)"
 echo "   最终 mInputShown=$(ime)  焦点屏=$(focus)"
-if [ "$YIELDS" -eq 0 ]; then echo "   这轮不算数:agent 一次都没让过,说明机主全程没打字"
+if [ "$KEYS" -eq 0 ]; then echo "   这轮不算数:一个字都没敲进去,没有「打字期间」可言"
+elif [ "$YIELDS" -eq 0 ]; then echo "   这轮不算数:agent 一次都没让过,说明机主全程没打字"
 elif [ "$DROPS" -eq 0 ]; then echo "   机主的键盘全程没被动过 ✓"
 else echo "   机主的键盘被打断了 ✗"; fi
