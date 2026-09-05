@@ -23,7 +23,7 @@ at()    { printf "  %-22s 焦点屏=%-3s 输入法=%s\n" "$1" "$(focus)" "$(ime)
 # 而焦点会不会跑正是要量的东西。
 snap0() {
   sh logcat -c
-  sh am broadcast -a $A.SNAP --ei display 0 >/dev/null 2>&1
+  bc -a $A.SNAP --ei display 0 >/dev/null 2>&1
   python -c "import time;time.sleep(1.8)"
   sh logcat -d -s WPEyes:*
 }
@@ -44,10 +44,10 @@ prepare() {
   python -c "import time;time.sleep(2.5)"
   local IDX=$(fieldidx)
   [ -z "$IDX" ] && { echo "主屏上找不到设置页的搜索框"; return 1; }
-  sh am broadcast -a $A.CLICK --ei display 0 --ei index "$IDX" >/dev/null 2>&1
+  bc -a $A.CLICK --ei display 0 --ei index "$IDX" >/dev/null 2>&1
   python -c "import time;time.sleep(1.5)"
   IDX=$(fieldidx)
-  sh am broadcast -a $A.TEXT --ei display 0 --ei index "$IDX" --es text "'AAA'" >/dev/null 2>&1
+  bc -a $A.TEXT --ei display 0 --ei index "$IDX" --es text "'AAA'" >/dev/null 2>&1
   python -c "import time;time.sleep(1.5)"
 }
 
@@ -72,7 +72,7 @@ run() {
   handback; at "  还焦点后"
 
   for i in 1 2 3; do
-    sh am broadcast -a $A.CLICK --ei display "$ID" --es text "$i" >/dev/null 2>&1
+    bc -a $A.CLICK --ei display "$ID" --es text "$i" >/dev/null 2>&1
     python -c "import time;time.sleep(0.8)"
   done
   at "无障碍连点三下后"

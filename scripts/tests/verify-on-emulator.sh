@@ -50,7 +50,7 @@ naps 3
 echo
 echo "== 1. 判据:无障碍报不报 IME 窗口 =="
 # 键盘没弹的时候
-sh logcat -c; sh am broadcast -a $A.TYPING >/dev/null 2>&1; naps 2
+sh logcat -c; bc -a $A.TYPING >/dev/null 2>&1; naps 2
 echo "-- 键盘没弹 --"; sh logcat -d -s WPEyes:* | sed -n '/---- TYPING ----/,$p' | sed 's/^/   /' | tail -4
 
 # 把键盘叫出来:用系统设置里的搜索框,模拟器上一定有
@@ -60,7 +60,7 @@ B=$("$ADB" shell cat /sdcard/wp.xml 2>/dev/null | tr '<' '\n' | grep -iE 'class=
     | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '\n' ' ')
 [ -n "$B" ] && { set -- $B; sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null 2>&1; naps 3; }
 [ "$(shown)" != "true" ] && { echo "   键盘没叫起来(mInputShown=$(shown)),后面测不了"; exit 1; }
-sh logcat -c; sh am broadcast -a $A.TYPING >/dev/null 2>&1; naps 2
+sh logcat -c; bc -a $A.TYPING >/dev/null 2>&1; naps 2
 echo "-- 键盘弹着 --"; sh logcat -d -s WPEyes:* | sed -n '/---- TYPING ----/,$p' | sed 's/^/   /' | tail -4
 echo "   ↑ 这两组里「无障碍」那一行必须分别是 false / true。都是 false 的话,"
 echo "     让路机制会静默失效,只能靠 IMMS 兜底那条路。"

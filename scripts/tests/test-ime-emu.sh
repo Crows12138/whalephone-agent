@@ -19,7 +19,9 @@ focus() { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-
 # 先让任务跑起来,过 ARM_AFTER 秒再把键盘顶起来,只统计这段窗口内的掉落。
 # (先顶键盘再开任务只能测到「造屏」那一处;跑起来之后的每一次页面跳转才是大头。)
 arm() {
-  sh am start -a android.settings.SETTINGS >/dev/null 2>&1; naps 3
+  # 必须带 --display 0。不带的话 am 会启到**当前顶层焦点屏**上,而 agent 干活时
+  # 那正是副屏 —— 等于测试自己把设置塞进了 agent 的屏,agent 就此看不懂自己在哪。
+  sh am start --display 0 -a android.settings.SETTINGS >/dev/null 2>&1; naps 3
   for _ in 1 2 3; do
     sh uiautomator dump /sdcard/wp.xml >/dev/null 2>&1
     B=$("$ADB" shell cat /sdcard/wp.xml 2>/dev/null | tr '<' '
@@ -33,7 +35,7 @@ arm() {
 
 echo "== 开跑(机主先不打字)=="
 sh logcat -c
-sh am broadcast -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
 
 T0=$(date +%s)
 DROPS=0; AFTER=0; STEAL=0; PREV=$(shown); ARMED=0; CLOSED=0

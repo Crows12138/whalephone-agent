@@ -17,7 +17,7 @@ TYPE="abcdefghijklmnopqrstuvwxyz"
 
 snap0() {
   sh logcat -c
-  sh am broadcast -a $A.SNAP --ei display 0 >/dev/null 2>&1
+  bc -a $A.SNAP --ei display 0 >/dev/null 2>&1
   python -c "import time;time.sleep(1.6)"
   sh logcat -d -s WPEyes:*
 }
@@ -30,10 +30,10 @@ echo "== 准备:主屏放一个真实的输入界面 =="
 sh am start -n com.android.settings.intelligence/.search.SearchActivity >/dev/null 2>&1
 python -c "import time;time.sleep(3)"
 I=$(idx); [ -z "$I" ] && { echo "主屏找不到输入框"; exit 1; }
-sh am broadcast -a $A.CLICK --ei display 0 --ei index "$I" >/dev/null 2>&1
+bc -a $A.CLICK --ei display 0 --ei index "$I" >/dev/null 2>&1
 python -c "import time;time.sleep(1.5)"
 I=$(idx)
-sh am broadcast -a $A.TEXT --ei display 0 --ei index "$I" --es text "''" >/dev/null 2>&1
+bc -a $A.TEXT --ei display 0 --ei index "$I" --es text "''" >/dev/null 2>&1
 python -c "import time;time.sleep(1.5)"
 echo "   输入框已聚焦,内容=「$(field)」  用户前台=$(top)"
 
@@ -41,7 +41,7 @@ echo
 echo "== 开跑:agent 接任务,同时用户一直打字 =="
 echo "   任务: $GOAL"
 sh logcat -c
-sh am broadcast -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
 
 # 用户在整个任务期间持续打字
 ( for c in $(echo "$TYPE" | grep -o .); do

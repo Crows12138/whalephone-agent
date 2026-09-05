@@ -43,24 +43,34 @@ sh logcat -c
 echo
 echo "== 1. 判据可不可信 =="
 echo "-- 键盘没弹的时候,两路都该说 false --"
-sh am broadcast -a $A.TYPING >/dev/null 2>&1; naps 2
+bc -a $A.TYPING >/dev/null 2>&1; naps 2
 sh logcat -d -s WPEyes:* | sed -n '/---- TYPING ----/,$p' | sed 's/^/   /' | tail -4
 
 echo "-- 把机主的真实输入法叫出来,两路都该说 true --"
-sh dumpsys activity activities | grep -m1 topResumedActivity | grep -q emmx || {
-  sh am start --display 0 -n com.microsoft.emmx/com.microsoft.ruby.Main >/dev/null 2>&1; naps 5; }
-for _ in 1 2 3; do
-  sh uiautomator dump /sdcard/wp.xml >/dev/null 2>&1
-  B=$("$ADB" shell cat /sdcard/wp.xml 2>/dev/null | tr '<' '\n' \
-      | grep -iE 'resource-id="[^"]*(url_bar|search_box|location_bar)' \
-      | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | head -1 | grep -oE '[0-9]+' | tr '\n' ' ')
-  [ -n "$B" ] && { set -- $B; sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null 2>&1; naps 2.5; }
-  sh dumpsys input_method | grep -q "mInputShown=true" && break
-done
-sh dumpsys input_method | grep -q "mInputShown=true" || { echo "   输入法没叫起来,后面两层测不了"; exit 1; }
+raise_ime || { echo "   输入法没叫起来,后面两层测不了"; exit 1; }
 sh logcat -c
-sh am broadcast -a $A.TYPING >/dev/null 2>&1; naps 2
+bc -a $A.TYPING >/dev/null 2>&1; naps 2
 sh logcat -d -s WPEyes:* | sed -n '/---- TYPING ----/,$p' | sed 's/^/   /' | tail -4
+
+echo
+echo "== 1.5 三星专有的那几处(模拟器上验不到,只能在这台机器上看)=="
+sh logcat -c
+bc -a $A.RUN --es goal "'打开计算器'" >/dev/null 2>&1
+for _ in $(seq 1 25); do naps 2; sh logcat -d -s WPSvc:* | grep -q "结束 done=" && break; done
+D=$(sh dumpsys display | grep -oE "^  mDisplayId=[0-9]+" | grep -oE "[0-9]+$" | sort -n | tail -1)
+# 一、无障碍在这台 ROM 上看不看得见私有虚拟屏。原生 AOSP 是看不见的
+# (AccessibilityManagerService.isValidDisplay 排除 FLAG_PRIVATE 的虚拟屏),
+# 三星放宽了 —— 如果这里出现「补 PUBLIC 重造」,说明三星也收紧了,得重新评估。
+sh logcat -d -s WPPriv:* | grep -E "看得见副屏|补 PUBLIC 重造" | sed 's/^.*: /   /' | tail -2
+# 二、DeX 会不会自己往副屏上放一个桌面。那是个可获焦窗口,意味着副屏一建起来
+# 就一直占着一个焦点 —— 模拟器上副屏是空的,这条只有这里能看。
+sh logcat -c; bc -a $A.DUMP >/dev/null 2>&1; naps 2
+echo "   副屏($D)上有什么窗口:"
+sh logcat -d -s WPEyes:* | sed -n "/Display $D /,/---- end/p" | sed 's/^.*WPEyes  *: /     /' | head -5
+# 三、讯飞输入法会不会照样被报成 TYPE_INPUT_METHOD
+raise_ime && { sh logcat -c; bc -a $A.TYPING >/dev/null 2>&1; naps 2
+  echo "   讯飞输入法弹着时的判据:"
+  sh logcat -d -s WPEyes:* | sed -n '/---- TYPING ----/,$p' | sed 's/^.*WPEyes  *: /     /' | tail -4; }
 
 echo
 echo "== 2 + 3. 让路有没有触发,结果对不对 =="

@@ -26,34 +26,37 @@ echo "== 准备:在主屏上把真实输入法叫出来 =="
 # 「Input dispatching timed out」ANR,而 ANR 对话框本身也会带走键盘 ——
 # 拿本 app 当载体,等于用一个会被待测现象弄坏的东西去测那个现象,
 # 量出来的「被收起 6 次」里有几次是自己的 ANR 造成的都分不清。
-sh dumpsys activity activities | grep -m1 topResumedActivity | grep -q emmx || {
-  sh monkey -p com.microsoft.emmx -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-  python -c "import time;time.sleep(5)"
-}
-for _ in 1 2 3; do
-  sh logcat -c; sh am broadcast -a $A.SNAP --ei display 0 >/dev/null 2>&1
-  python -c "import time;time.sleep(2)"
-  I=$(sh logcat -d -s WPEyes:* | grep -oE '\[[0-9]+\] EditText' | head -1 | grep -oE '[0-9]+' | head -1)
-  [ -n "$I" ] && {
-    sh am broadcast -a $A.CLICK --ei display 0 --ei index "$I" >/dev/null 2>&1
-    python -c "import time;time.sleep(2.5)"
-    [ "$(ime)" = "true" ] && break
-  }
-done
-[ "$(ime)" != "true" ] && { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
+#
+# 也不能用 app 的 SNAP/CLICK 广播来点输入框:A11yGate 上线后无障碍默认是关的,
+# 那两个广播的接收器根本不存在,准备阶段会直接失败。raise_ime 走 uiautomator,
+# 不吃这个依赖。
+raise_ime || { echo "输入法没起来(mInputShown=$(ime)),测不了"; exit 1; }
 echo "   输入法已弹出 mInputShown=true  焦点屏=$(focus)"
 
 echo
 echo "== 开跑,全程采样 =="
 sh logcat -c
-sh am broadcast -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
+bc -a $A.RUN --es goal "'$GOAL'" >/dev/null 2>&1
 
-DROPS=0; STEAL=0; PREV=true
-for i in $(seq 1 200); do
+# 机主不会一直开着键盘不动。让键盘全程弹着,测的就变成「等到超时之后会怎样」,
+# 那不是真实场景 —— 真人打字是几秒到几十秒然后停。
+# 所以只在前 TYPING_S 秒保持弹出,之后自己收掉;判定只看这段窗口内的掉落。
+TYPING_S="${TYPING_S:-45}"
+T0=$(date +%s)
+DROPS=0; AFTER=0; STEAL=0; PREV=true; CLOSED=0
+for i in $(seq 1 600); do
+  NOW=$(( $(date +%s) - T0 ))
+  if [ "$CLOSED" = "0" ] && [ "$NOW" -ge "$TYPING_S" ]; then
+    echo "   [${NOW}s] 机主打完字,自己收起键盘(之后的掉落不算 agent 头上)"
+    sh input -d 0 keyevent 111 >/dev/null 2>&1
+    CLOSED=1; python -c "import time;time.sleep(1)"; PREV=$(ime); continue
+  fi
   M=$(ime); F=$(focus)
-  [ "$PREV" = "true" ] && [ "$M" = "false" ] && {
-    DROPS=$((DROPS+1)); echo "   [$(date +%H:%M:%S)] 输入法被收起(第 $DROPS 次)  焦点屏=$F"
-  }
+  if [ "$PREV" = "true" ] && [ "$M" = "false" ]; then
+    if [ "$CLOSED" = "0" ]; then
+      DROPS=$((DROPS+1)); echo "   [${NOW}s] 机主还在打字,键盘却被收起(第 $DROPS 次)  焦点屏=$F"
+    else AFTER=$((AFTER+1)); fi
+  fi
   [ -n "$F" ] && [ "$F" != "0" ] && STEAL=$((STEAL+1))
   PREV="$M"
   sh logcat -d -s WPSvc:* | grep -q "结束 done=" && break
@@ -72,7 +75,8 @@ YIELDS=$(sh logcat -d -s WPConflict:* 2>/dev/null | grep -c "机主在打字")
 ANRS=$(sh logcat -d -b events 2>/dev/null | grep -c "am_anr")
 echo "== 结论 =="
 echo "   期间 ANR 次数        $ANRS   (要求 0)"
-echo "   输入法被收起次数    $DROPS   (要求 0)"
+echo "   打字期间键盘被收起  $DROPS   (要求 0 —— 这一项才是「有没有打扰机主」)"
+echo "   打字结束后被收起    $AFTER  (不算 agent 头上,机主已经不在打字了)"
 echo "   agent 主动让路次数  $YIELDS   (为 0 说明这次机主没打字,这轮测试无效)"
 echo "   焦点不在主屏的采样  $STEAL 次 (要求 0;短暂离开随即还回来也会被采到)"
 echo "   最终 mInputShown=$(ime)  焦点屏=$(focus)"

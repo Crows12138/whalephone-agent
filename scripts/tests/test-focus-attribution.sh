@@ -26,25 +26,12 @@ focus() { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-
 # 「Application does not have a focused window」而 ANR,拿它当载体等于用一个
 # 会被待测现象弄坏的东西去测那个现象。
 arm() {
-  # 不重启 Edge —— 每次 force-stop 再拉起来太脆(实测六个用例只成了两个)。
-  # 只在它不在前台时才拉一次,平时就重新点一下地址栏把输入法叫回来。
-  sh dumpsys activity activities | grep -m1 topResumedActivity | grep -q emmx || {
-    sh monkey -p com.microsoft.emmx -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-    python -c "import time;time.sleep(5)"
-  }
-  for _ in 1 2 3; do
-    sh logcat -c; sh am broadcast -a $A.SNAP --ei display 0 >/dev/null 2>&1
-    python -c "import time;time.sleep(2)"
-    local I=$(sh logcat -d -s WPEyes:* | grep -oE '\[[0-9]+\] EditText' | head -1 | grep -oE '[0-9]+' | head -1)
-    [ -n "$I" ] && {
-      sh am broadcast -a $A.CLICK --ei display 0 --ei index "$I" >/dev/null 2>&1
-      python -c "import time;time.sleep(2.5)"
-      [ "$(ime)" = "true" ] && return 0
-    }
-    sh input -d 0 keyevent 0 >/dev/null 2>&1
-    python -c "import time;time.sleep(1)"
-  done
-  return 1
+  raise_ime && return 0
+  # 叫不起来时再推一次焦点回主屏,然后重试一遍 —— 有时是焦点还在副屏上,
+  # 点主屏的输入框根本不生效。
+  sh input -d 0 keyevent 0 >/dev/null 2>&1
+  python -c "import time;time.sleep(1)"
+  raise_ime
 }
 
 # 跑一个用例:名字 + 一条命令
@@ -60,15 +47,15 @@ case_() {
 }
 
 echo "== 造一块副屏,上面放个计算器 =="
-sh am broadcast -a $A.RUN --es goal "'打开计算器'" >/dev/null 2>&1
+bc -a $A.RUN --es goal "'打开计算器'" >/dev/null 2>&1
 for i in $(seq 1 20); do python -c "import time;time.sleep(2)"; sh logcat -d -s WPSvc:* | grep -q "结束 done=" && break; done
 D=$(sh dumpsys display | grep -oE "mDisplayId=[0-9]+" | grep -oE "[0-9]+$" | sort -n | tail -1)
 echo "   副屏 = $D"
 echo
 
 echo "== 逐个操作归因(每个用例前都把机主的输入法重新叫出来)=="
-case_ "无障碍 点击(普通按钮)"      "sh am broadcast -a $A.CLICK --ei display $D --es text 7"
-case_ "无障碍 写文本(带 FOCUS)"    "sh am broadcast -a $A.TEXT --ei display $D --es text 1"
+case_ "无障碍 点击(普通按钮)"      "bc -a $A.CLICK --ei display $D --es text 7"
+case_ "无障碍 写文本(带 FOCUS)"    "bc -a $A.TEXT --ei display $D --es text 1"
 case_ "注入 tap"                    "sh input -d $D tap 540 1750"
 case_ "注入 keyevent 返回"          "sh input -d $D keyevent 4"
 case_ "注入 swipe"                  "sh input -d $D swipe 540 1400 540 900 300"
