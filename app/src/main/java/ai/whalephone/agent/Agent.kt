@@ -22,9 +22,11 @@ class Agent(
     /**
      * 刚给机主做过的几件事(目标 -> 结果)。
      *
-     * 追加任务是常态:「那第二个多少钱」「换成美团再看一遍」。副屏上的界面还停在
-     * 上一个任务结束的地方,模型却对那件事一无所知 —— 不给它这份上下文,
-     * 它看到一屏商品详情会先猜自己在哪,或者干脆 home 掉重来。
+     * 追加任务是常态:「那第二个多少钱」「换成美团再看一遍」。不给这份上下文,
+     * 模型看到一屏商品详情会先猜自己在哪,或者干脆 home 掉重来。
+     *
+     * 只说做过什么,不替它断言界面还停在哪 —— 副屏有没有被重造过,这里并不知道。
+     * 当前那一帧就在同一份提示词里,界面是什么样让它自己看。
      */
     private val history: List<Pair<String, String>> = emptyList(),
 ) {
@@ -234,7 +236,7 @@ class Agent(
         appendLine("目标:$goal")
         appendLine()
         if (history.isNotEmpty()) {
-            appendLine("你刚给他做过的(副屏上的界面很可能还停在最后那一步):")
+            appendLine("你刚给他做过的:")
             history.forEach { (g, r) -> appendLine("  · 「$g」 -> $r") }
             appendLine()
         }
