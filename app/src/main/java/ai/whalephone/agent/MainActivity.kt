@@ -36,8 +36,8 @@ class MainActivity : Activity() {
     private lateinit var detail: TextView
     private lateinit var detailBox: LinearLayout
     private lateinit var input: EditText
-    private lateinit var sendBtn: TextView
-    private lateinit var micBtn: TextView
+    private lateinit var sendBtn: android.widget.ImageView
+    private lateinit var micBtn: android.widget.ImageView
     private lateinit var screenChip: TextView
     private lateinit var ballChip: TextView
     private lateinit var watchChip: TextView
@@ -139,11 +139,8 @@ class MainActivity : Activity() {
 
     private fun buildInputBar(): View {
         val pad = Ui.dp(this, 10f)
-        micBtn = Ui.text(this, "🎤", 17f, pal.accent).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 19f)), pal.ripple)
-            setOnClickListener { toggleVoice() }
-        }
+        micBtn = Ui.iconBtn(this, R.drawable.ic_mic, pal.accent, pal.surfaceAlt, pal.ripple)
+            .apply { setOnClickListener { toggleVoice() } }
         input = EditText(this).apply {
             hint = "说一句你要它做什么"
             setHintTextColor(pal.textSub)
@@ -157,11 +154,8 @@ class MainActivity : Activity() {
                 if (id == EditorInfo.IME_ACTION_SEND) { onSendOrStop(); true } else false
             }
         }
-        sendBtn = Ui.text(this, "➤", 16f, pal.onAccent).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(pal.accent, Ui.dp(this@MainActivity, 19f)), pal.ripple)
-            setOnClickListener { onSendOrStop() }
-        }
+        sendBtn = Ui.iconBtn(this, R.drawable.ic_send, pal.onAccent, pal.accent, pal.ripple, padDp = 10f)
+            .apply { setOnClickListener { onSendOrStop() } }
         val bar = Ui.row(this).apply {
             setPadding(pad, Ui.dp(this@MainActivity, 6f), pad, Ui.dp(this@MainActivity, 6f))
             background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 24f), pal.line, Ui.dp(this@MainActivity, 1f))
@@ -308,9 +302,8 @@ class MainActivity : Activity() {
 
     private fun syncSendButton() {
         val run = AgentBus.running
-        sendBtn.text = if (run) "■" else "➤"
-        sendBtn.background = Ui.tappable(
-            Ui.round(if (run) pal.bad else pal.accent, Ui.dp(this, 19f)), pal.ripple)
+        Ui.repaintIcon(sendBtn, if (run) R.drawable.ic_stop else R.drawable.ic_send,
+            pal.onAccent, if (run) pal.bad else pal.accent, pal.ripple)
     }
 
     private fun toggleOverlay(screen: Boolean) {
@@ -375,7 +368,7 @@ class MainActivity : Activity() {
         if (!Voice.micGranted(this)) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC); return
         }
-        micBtn.setTextColor(pal.bad)
+        Ui.repaintIcon(micBtn, null, pal.onAccent, pal.bad, pal.ripple)
         input.hint = "在听…"
         voice = Voice(this,
             onPartial = { t -> input.setText(t); input.setSelection(input.text.length) },
@@ -390,7 +383,7 @@ class MainActivity : Activity() {
 
     private fun stopVoice() {
         voice?.stop(); voice = null
-        micBtn.setTextColor(pal.accent)
+        Ui.repaintIcon(micBtn, null, pal.accent, pal.surfaceAlt, pal.ripple)
         input.hint = "说一句你要它做什么"
     }
 

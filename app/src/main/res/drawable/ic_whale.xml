@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 鲸尾。
+         先试的是侧视的一整条鲸:52dp 的球上身子只能是个椭圆、尾巴只能是个三角,
+         连喷的水柱都被当成两根触角 —— 看着就是一条小鱼。鲸尾没有这个问题。
+         关键是尾叶要肥:后缘从尾柄根部先往下沉、再往外扬,和前缘拉开六七格,
+         只差两三格的话出来的是一片叶子(或者一个「Y」)。 -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M10.9,21.0C10.9,19.2 10.6,17.6 10.0,16.4C7.8,16.0 4.4,13.0 2.2,6.2C1.6,4.6 2.8,3.8 3.9,4.8C5.0,5.6 9.6,7.6 12,11.6C14.4,7.6 19.0,5.6 20.1,4.8C21.2,3.8 22.4,4.6 21.8,6.2C19.6,13.0 16.2,16.0 14.0,16.4C13.4,17.6 13.1,19.2 13.1,21.0Z"/>
+</vector>

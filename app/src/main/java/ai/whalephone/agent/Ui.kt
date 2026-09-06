@@ -9,6 +9,7 @@ import android.graphics.drawable.RippleDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -43,6 +44,46 @@ object Ui {
             floatArrayOf(r * 1f, r * 1f, r * 1f, r * 1f, small, small, r * 1f, r * 1f)
         else
             floatArrayOf(r * 1f, r * 1f, r * 1f, r * 1f, r * 1f, r * 1f, small, small)
+    }
+
+    /** 圆形实底。图标按钮的底都用它 —— round() 传个大半径也能圆,但 OVAL 不用跟着尺寸算 */
+    fun oval(fill: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(fill)
+    }
+
+    /** 带渐变的圆。悬浮球用 —— 一个纯色圆压在任何壁纸上都像贴上去的贴纸 */
+    fun ovalGradient(from: Int, to: Int) =
+        GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(from, to)).apply {
+            shape = GradientDrawable.OVAL
+        }
+
+    /** 圆形按钮的按下水波。不给圆形遮罩的话水波是方的,会从圆底四角漏出来 */
+    fun ovalRipple(content: android.graphics.drawable.Drawable, ripple: Int) =
+        RippleDrawable(ColorStateList.valueOf(ripple), content, oval(Color.WHITE))
+
+    /**
+     * 图标按钮:圆底 + 矢量图标。
+     *
+     * 图标一律走 tint 上色,同一份资源在浅色/深色、静止/进行中之间只换颜色不换资源。
+     * 这些位置原来用的是 emoji 字符(🎤 ➤):emoji 是各家自己的贴图,三星画得又厚又艳,
+     * 和这一套线条图标摆在一起像贴错了,而且它不吃 tint —— 深色模式下颜色跟不上。
+     */
+    fun iconBtn(ctx: Context, res: Int, tint: Int, bg: Int, ripple: Int, padDp: Float = 9f) =
+        ImageView(ctx).apply {
+            setImageResource(res)
+            imageTintList = ColorStateList.valueOf(tint)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            val p = dp(ctx, padDp)
+            setPadding(p, p, p, p)
+            background = ovalRipple(oval(bg), ripple)
+        }
+
+    /** 换图标按钮的颜色(和图形)。res 传 null 表示只换色 */
+    fun repaintIcon(v: ImageView, res: Int?, tint: Int, bg: Int, ripple: Int) {
+        if (res != null) v.setImageResource(res)
+        v.imageTintList = ColorStateList.valueOf(tint)
+        v.background = ovalRipple(oval(bg), ripple)
     }
 
     /** 点得动的东西都要有按下反馈,否则在没有 material 的情况下会显得像图片 */
@@ -101,6 +142,9 @@ class Palette(night: Boolean) {
     val warn      = if (night) 0xFFFBBF24.toInt() else 0xFFD97706.toInt()
     val bad       = if (night) 0xFFF87171.toInt() else 0xFFDC2626.toInt()
     val ripple    = if (night) 0x33FFFFFF else 0x1A000000
+    /** 悬浮球的渐变两头。比 accent 稍微往紫走一点,球才不至于和界面里的蓝按钮撞脸 */
+    val ballFrom  = if (night) 0xFF4C8DFF.toInt() else 0xFF3B82F6.toInt()
+    val ballTo    = if (night) 0xFF7C5CFF.toInt() else 0xFF5B4BE8.toInt()
 
     companion object {
         fun of(ctx: Context) = Palette(Ui.night(ctx))

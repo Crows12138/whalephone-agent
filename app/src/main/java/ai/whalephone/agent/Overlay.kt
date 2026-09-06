@@ -26,6 +26,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlin.math.abs
@@ -370,10 +371,10 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
             setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 5f), Ui.dp(ctx, 4f), Ui.dp(ctx, 5f))
             addView(Ui.text(ctx, "副屏", 12f, pal.textSub, bold = true), Ui.lp(Ui.WRAP, Ui.WRAP))
             addView(View(ctx), Ui.lp(0, 1, 1f))
-            addView(Ui.text(ctx, "✕", 15f, pal.textSub).apply {
-                setPadding(Ui.dp(ctx, 8f), 0, Ui.dp(ctx, 8f), 0)
+            addView(Ui.iconBtn(ctx, R.drawable.ic_close, pal.textSub, Color.TRANSPARENT,
+                pal.ripple, padDp = 7f).apply {
                 setOnClickListener { OverlayService.setScreen(ctx, false) }
-            }, Ui.lp(Ui.WRAP, Ui.WRAP))
+            }, Ui.lp(Ui.dp(ctx, 30f), Ui.dp(ctx, 30f)))
         }
         draggable(bar)
 
@@ -452,11 +453,11 @@ class Ball(
 
     private enum class Mode { REST, VOICE, TYPE }
 
-    private lateinit var bubble: TextView
+    private lateinit var bubble: ImageView
     private lateinit var panel: LinearLayout
     private lateinit var voiceBox: LinearLayout
     private lateinit var typeBar: LinearLayout
-    private lateinit var micBtn: TextView
+    private lateinit var micBtn: MicOrb
     private lateinit var heard: TextView
     private lateinit var state: TextView
     private lateinit var sendBtn: TextView
@@ -503,10 +504,14 @@ class Ball(
         lp.x = sw - Ui.dp(ctx, 58f); lp.y = (sh * 0.55f).toInt()
         restX = lp.x; restY = lp.y
 
-        bubble = Ui.text(ctx, "鲸", 17f, pal.onAccent, bold = true).apply {
-            gravity = Gravity.CENTER
-            background = Ui.round(pal.accent, Ui.dp(ctx, 26f))
-            elevation = Ui.dp(ctx, 6f).toFloat()
+        bubble = ImageView(ctx).apply {
+            setImageResource(R.drawable.ic_whale)
+            imageTintList = android.content.res.ColorStateList.valueOf(pal.onAccent)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            val p = Ui.dp(ctx, 12f)
+            setPadding(p, p, p, p)
+            background = Ui.ovalGradient(pal.ballFrom, pal.ballTo)
+            elevation = Ui.dp(ctx, 8f).toFloat()
         }
         draggable(bubble, onTap = { toVoice() }, onDrop = { snap() })
 
@@ -553,21 +558,20 @@ class Ball(
     // ---- 语音态 ------------------------------------------------------------
 
     private fun buildVoiceBox(): LinearLayout {
-        micBtn = Ui.text(ctx, MIC, 21f, pal.accent).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 27f)), pal.ripple)
+        micBtn = MicOrb(ctx).apply {
+            foreground = Ui.ovalRipple(Ui.oval(Color.TRANSPARENT), pal.ripple)
             setOnClickListener {
                 ui.removeCallbacks(autoRest)
                 if (voice != null) { stopVoice(); say("停了,点麦克风重说") } else startVoice()
             }
         }
         state = Ui.text(ctx, "", 11f, pal.textSub)
-        heard = Ui.text(ctx, "", 16f, pal.textMain).apply { setLineSpacing(0f, 1.1f) }
-        val close = Ui.text(ctx, "✕", 14f, pal.textSub).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(Color.TRANSPARENT, Ui.dp(ctx, 18f)), pal.ripple)
-            setOnClickListener { toRest() }
+        heard = Ui.text(ctx, "", 16f, pal.textMain).apply {
+            setLineSpacing(0f, 1.1f)
+            visibility = View.GONE
         }
+        val close = Ui.iconBtn(ctx, R.drawable.ic_close, pal.textSub, Color.TRANSPARENT,
+            pal.ripple, padDp = 8f).apply { setOnClickListener { toRest() } }
 
         val words = Ui.col(ctx).apply {
             addView(state, Ui.lp(Ui.MATCH, Ui.WRAP))
@@ -581,8 +585,10 @@ class Ball(
             addView(close, Ui.lp(Ui.dp(ctx, 34f), Ui.dp(ctx, 34f)))
         }
 
-        val keyboard = pill("键盘", accent = false) { toType(heard.text.toString()) }
-        sendBtn = pill("发送", accent = true) { send(heard.text.toString()) }
+        val keyboard = pill("键盘", R.drawable.ic_keyboard, accent = false) {
+            toType(heard.text.toString())
+        }
+        sendBtn = pill("发送", R.drawable.ic_send, accent = true) { send(heard.text.toString()) }
         sendBtn.visibility = View.GONE
         val acts = Ui.row(ctx).apply {
             addView(keyboard, Ui.lp(Ui.WRAP, Ui.dp(ctx, 34f)))
@@ -598,12 +604,21 @@ class Ball(
         }
     }
 
-    private fun pill(t: String, accent: Boolean, onClick: () -> Unit) =
+    private fun pill(t: String, res: Int, accent: Boolean, onClick: () -> Unit) =
         Ui.text(ctx, t, 13f, if (accent) pal.onAccent else pal.textSub).apply {
             gravity = Gravity.CENTER
-            val bg = if (accent) pal.accent else pal.surfaceAlt
-            background = Ui.tappable(Ui.round(bg, Ui.dp(ctx, 17f)), pal.ripple)
-            setPadding(Ui.dp(ctx, 18f), 0, Ui.dp(ctx, 18f), 0)
+            val fg = if (accent) pal.onAccent else pal.textSub
+            background = Ui.tappable(Ui.round(
+                if (accent) pal.accent else pal.surfaceAlt, Ui.dp(ctx, 17f)), pal.ripple)
+            setPadding(Ui.dp(ctx, 15f), 0, Ui.dp(ctx, 17f), 0)
+            // 图标按 16dp 摆,不用 intrinsic bounds —— 那是 24dp,挨着 13sp 的字太大
+            val d = ctx.getDrawable(res)!!.mutate().apply {
+                setTint(fg)
+                val n = Ui.dp(ctx, 16f)
+                setBounds(0, 0, n, n)
+            }
+            setCompoundDrawablesRelative(d, null, null, null)
+            compoundDrawablePadding = Ui.dp(ctx, 6f)
             setOnClickListener { ui.removeCallbacks(autoRest); onClick() }
         }
 
@@ -615,7 +630,7 @@ class Ball(
         panel.visibility = View.VISIBLE
         voiceBox.visibility = View.VISIBLE
         typeBar.visibility = View.GONE
-        heard.text = ""
+        heard("")
         sendBtn.visibility = View.GONE
         lp.flags = voiceFlags
         lp.width = sw - Ui.dp(ctx, 20f)
@@ -631,7 +646,7 @@ class Ball(
 
     private fun startVoice() {
         if (voice != null) return
-        heard.text = ""
+        heard("")
         sendBtn.visibility = View.GONE
         if (!Voice.available(ctx)) { say("这台机器上没有语音识别,点「键盘」打字"); armRest(); return }
         if (!Voice.micGranted(ctx)) { say("还没给录音权限 —— 打开 app,设置里给一次"); armRest(); return }
@@ -640,11 +655,11 @@ class Ball(
         say("在听…")
         voice = Voice(
             ctx,
-            onPartial = { t -> heard.text = t },
+            onPartial = { t -> heard(t) },
             onFinal = { t ->
                 stopVoice()
                 if (t.isBlank()) { say("没听清,点麦克风再说一次"); armRest() }
-                else { heard.text = t; say("要它做这个吗?"); sendBtn.visibility = View.VISIBLE }
+                else { heard(t); say("要它做这个吗?"); sendBtn.visibility = View.VISIBLE }
             },
             onError = { msg -> stopVoice(); say(msg); armRest() },
             onLevel = { rms -> level(rms) },
@@ -661,24 +676,15 @@ class Ball(
     /** 在听的时候麦克风要看得出来在动 —— 否则机主不知道它到底听没听见 */
     private fun listening(on: Boolean) {
         pulse?.cancel(); pulse = null
-        micBtn.scaleX = 1f; micBtn.scaleY = 1f
-        if (!on) {
-            gotLevel = false
-            micBtn.setTextColor(pal.accent)
-            micBtn.background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 27f)), pal.ripple)
-            return
-        }
-        micBtn.setTextColor(pal.onAccent)
-        micBtn.background = Ui.tappable(Ui.round(pal.bad, Ui.dp(ctx, 27f)), pal.ripple)
-        // 识别器不一定报音量。报之前先自己呼吸,报了就交给真实音量(见 level)
-        pulse = ValueAnimator.ofFloat(1f, 1.12f).apply {
-            duration = 700
+        micBtn.listening = on
+        micBtn.level = 0f
+        if (!on) { gotLevel = false; return }
+        // 识别器不一定报音量。报之前光晕自己呼吸,报了就交给真实音量(见 level)
+        pulse = ValueAnimator.ofFloat(0.15f, 0.85f).apply {
+            duration = 750
             repeatMode = ValueAnimator.REVERSE
             repeatCount = ValueAnimator.INFINITE
-            addUpdateListener { a ->
-                val f = a.animatedValue as Float
-                micBtn.scaleX = f; micBtn.scaleY = f
-            }
+            addUpdateListener { a -> if (!gotLevel) micBtn.level = a.animatedValue as Float }
             start()
         }
     }
@@ -686,22 +692,59 @@ class Ball(
     /** onRmsChanged 的量纲是 dB,各家实现不一,这里只当作「有多大声」压进一个小范围 */
     private fun level(rms: Float) {
         if (!gotLevel) { gotLevel = true; pulse?.cancel(); pulse = null }
-        val f = 1f + (rms.coerceIn(0f, 10f) / 10f) * 0.3f
-        micBtn.scaleX = f; micBtn.scaleY = f
+        micBtn.level = (rms.coerceIn(-2f, 10f) + 2f) / 12f
+    }
+
+    /**
+     * 麦克风按钮。在听的时候外面一圈光晕跟着音量涨落 ——
+     * 机主得看得出来它真听见了,光有一行「在听…」的字看不出死活。
+     */
+    private inner class MicOrb(c: Context) : View(c) {
+        var listening = false
+            set(v) { field = v; invalidate() }
+
+        /** 已经归一化到 0..1 的音量 */
+        var level = 0f
+            set(v) { field = v; invalidate() }
+
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val glyph = ctx.getDrawable(R.drawable.ic_mic)!!.mutate()
+
+        override fun onDraw(canvas: Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val r = min(width, height) / 2f
+            val core = r * 0.74f
+            if (listening) {
+                p.color = pal.bad
+                p.alpha = 56
+                canvas.drawCircle(cx, cy, core + (r - core) * (0.2f + 0.8f * level), p)
+            }
+            p.color = if (listening) pal.bad else pal.surfaceAlt
+            canvas.drawCircle(cx, cy, core, p)
+            val g = (core * 1.2f).toInt()
+            glyph.setTint(if (listening) pal.onAccent else pal.accent)
+            glyph.setBounds((cx - g / 2).toInt(), (cy - g / 2).toInt(),
+                (cx + g / 2).toInt(), (cy + g / 2).toInt())
+            glyph.draw(canvas)
+        }
     }
 
     private fun say(s: String) { state.text = s }
+
+    /** 识别到的原话。没有字就整行收起来 —— 空着一行会把「在听…」顶得偏上 */
+    private fun heard(t: String) {
+        heard.text = t
+        heard.visibility = if (t.isBlank()) View.GONE else View.VISIBLE
+    }
 
     private fun armRest() = ui.postDelayed(autoRest, 6_000)
 
     // ---- 键盘态 ------------------------------------------------------------
 
     private fun buildTypeBar(): LinearLayout {
-        val back = Ui.text(ctx, MIC, 17f, pal.accent).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 19f)), pal.ripple)
-            setOnClickListener { toVoice() }
-        }
+        val back = Ui.iconBtn(ctx, R.drawable.ic_mic, pal.accent, pal.surfaceAlt, pal.ripple)
+            .apply { setOnClickListener { toVoice() } }
         input = EditText(ctx).apply {
             hint = "说一句你要它做什么"
             setHintTextColor(pal.textSub)
@@ -712,11 +755,8 @@ class Ball(
             imeOptions = EditorInfo.IME_ACTION_SEND
             setOnEditorActionListener { _, _, _ -> send(text.toString()); true }
         }
-        val go = Ui.text(ctx, SEND, 16f, pal.onAccent).apply {
-            gravity = Gravity.CENTER
-            background = Ui.tappable(Ui.round(pal.accent, Ui.dp(ctx, 19f)), pal.ripple)
-            setOnClickListener { send(input.text.toString()) }
-        }
+        val go = Ui.iconBtn(ctx, R.drawable.ic_send, pal.onAccent, pal.accent, pal.ripple, padDp = 10f)
+            .apply { setOnClickListener { send(input.text.toString()) } }
         return Ui.row(ctx).apply {
             visibility = View.GONE
             setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 7f), Ui.dp(ctx, 10f), Ui.dp(ctx, 7f))
@@ -766,7 +806,7 @@ class Ball(
         ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
         stopVoice()
         input.setText("")
-        heard.text = ""
+        heard("")
         say("")
         sendBtn.visibility = View.GONE
         runCatching { ime()?.hideSoftInputFromWindow(input.windowToken, 0) }
@@ -804,7 +844,7 @@ class Ball(
         }
         stopVoice()
         AgentService.start(ctx, g)
-        heard.text = g
+        heard(g)
         say("已经派下去了,进度看通知")
         sendBtn.visibility = View.GONE
         input.setText("")
@@ -815,10 +855,5 @@ class Ball(
         ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
         stopVoice()
         super.hide()
-    }
-
-    private companion object {
-        const val MIC = "🎤"
-        const val SEND = "➤"
     }
 }

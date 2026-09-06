@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 话筒:上面一个胶囊,下面一条弧和一根柱子。线宽和圆头都按 24 格画,任何尺寸下都不会糊 -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2.6c-1.77,0 -3.2,1.43 -3.2,3.2v5.9c0,1.77 1.43,3.2 3.2,3.2s3.2,-1.43 3.2,-3.2V5.8c0,-1.77 -1.43,-3.2 -3.2,-3.2z"/>
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.9"
+        android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M5.4,11.3a6.6,6.6 0 0 0 13.2,0"/>
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.9"
+        android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M12,18.1v3.1"/>
+</vector>
