@@ -54,6 +54,7 @@ class MainActivity : Activity() {
         super.onCreate(b)
         window.statusBarColor = pal.bg
         window.navigationBarColor = pal.bg
+        AgentBus.attach(this)
         setContentView(buildRoot())
         redraw()
         refreshStatus()
@@ -89,6 +90,18 @@ class MainActivity : Activity() {
             background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 12f)), pal.ripple)
             setOnClickListener { detailBox.visibility = if (detailBox.isShown) View.GONE else View.VISIBLE }
         }
+        // 唯一一个清空上下文的地方。默认什么都不清 —— 机主随时可能追一句,
+        // 「它还记不记得刚才那件事」该由他说了算
+        val fresh = Ui.text(this, "新任务", 12f, pal.textSub).apply {
+            setPadding(Ui.dp(this@MainActivity, 10f), Ui.dp(this@MainActivity, 4f),
+                Ui.dp(this@MainActivity, 10f), Ui.dp(this@MainActivity, 4f))
+            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 12f)), pal.ripple)
+            setOnClickListener {
+                if (AgentBus.running) { toast("先让它把手上这件事做完"); return@setOnClickListener }
+                AgentBus.newThread()
+                input.setText("")
+            }
+        }
         val gear = Ui.text(this, "⚙", 18f, pal.textSub).apply {
             setPadding(Ui.dp(this@MainActivity, 10f), 0, 0, 0)
             setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
@@ -98,6 +111,9 @@ class MainActivity : Activity() {
             setBackgroundColor(pal.bg)
             addView(Ui.text(this@MainActivity, "手机助理", 19f, pal.textMain, bold = true))
             addView(View(this@MainActivity), Ui.lp(0, 1, 1f))
+            addView(fresh, Ui.lp(Ui.WRAP, Ui.WRAP).apply {
+                marginEnd = Ui.dp(this@MainActivity, 6f)
+            })
             addView(pill)
             addView(gear)
         }

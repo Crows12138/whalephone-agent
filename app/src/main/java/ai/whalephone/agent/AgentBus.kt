@@ -1,5 +1,6 @@
 package ai.whalephone.agent
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.CopyOnWriteArrayList
@@ -38,6 +39,7 @@ object AgentBus {
     private const val CAP = 400
 
     private val items = ArrayDeque<Line>()
+    private var loaded = false
     private val listeners = CopyOnWriteArrayList<(Line?) -> Unit>()
     private val main = Handler(Looper.getMainLooper())
 
@@ -61,6 +63,23 @@ object AgentBus {
         fire(null)
     }
 
+    /**
+     * 接上落盘的那一份。界面、agent、悬浮窗三个入口谁先起来谁调,重复调无害。
+     *
+     * 不落盘的话「默认不清、点新任务才清」就是假的:进程一被回收,机主的上一段
+     * 对话和模型的上下文一起消失,而他既没点过新任务,也看不见发生了什么。
+     */
+    fun attach(ctx: Context) {
+        synchronized(items) {
+            if (loaded) return
+            loaded = true
+            Chat.attach(ctx.applicationContext)
+            items.clear()
+            items.addAll(Chat.current())
+        }
+        fire(null)
+    }
+
     fun snapshot(): List<Line> = synchronized(items) { items.toList() }
 
     fun post(kind: Kind, title: String, body: String = "") {
@@ -69,6 +88,7 @@ object AgentBus {
             items.addLast(line)
             while (items.size > CAP) items.removeFirst()
         }
+        Chat.append(line)
         fire(line)
     }
 
@@ -78,7 +98,15 @@ object AgentBus {
         fire(null)
     }
 
-    fun clear() {
+    /**
+     * 开新的一段对话。
+     *
+     * 这是**唯一**一处清空:上下文默认一直留着,任务做完不清、保温到点也不清 ——
+     * 机主随时可能追一句,而「它还记不记得刚才那件事」这件事应该由他说了算,
+     * 不该由一个后台计时器替他决定。旧的那一段不删,只是不再进模型的上下文。
+     */
+    fun newThread() {
+        Chat.newThread()
         synchronized(items) { items.clear() }
         fire(null)
     }

@@ -60,6 +60,8 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(WindowManager::class.java)
+        // 悬浮球也要知道「它在等回答」这类状态,而这些状态跟对话记录是同一份
+        AgentBus.attach(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
