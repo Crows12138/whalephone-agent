@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var scroller: ScrollView
     private lateinit var goal: EditText
+    private lateinit var shizukuBtn: Button
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -57,10 +58,11 @@ class MainActivity : Activity() {
             text = "刷新状态"
             setOnClickListener { refresh() }
         })
-        root.addView(Button(this).apply {
+        shizukuBtn = Button(this).apply {
             text = "授权 Shizuku"
-            setOnClickListener { Privileged.requestPermission(); refresh() }
-        })
+            setOnClickListener { onShizuku() }
+        }
+        root.addView(shizukuBtn)
         root.addView(Button(this).apply {
             text = "打开无障碍设置"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
@@ -165,6 +167,22 @@ class MainActivity : Activity() {
         refresh()
     }
 
+    /**
+     * Shizuku 没在运行的时候,「授权」这个按钮是点不动的:权限请求要发给 Shizuku 的
+     * 服务,服务都没起来,点下去只会静默失败 —— 机主看到的是「按了没反应」。
+     *
+     * 而**没有任何 app 能替他启动那个服务**。它必须由 shell(uid 2000)或 root 拉起;
+     * 普通 app 能拉起它的话,Shizuku 这套东西就没有意义了。所以这里不去「自动启动」,
+     * 只把他送到能启动的地方:打开 Shizuku,在里面用「通过无线调试启动」自己拉起
+     * (Android 11 起支持,不需要电脑)。
+     */
+    private fun onShizuku() {
+        if (Privileged.shizukuAlive()) { Privileged.requestPermission(); refresh(); return }
+        val i = packageManager.getLaunchIntentForPackage(SHIZUKU_PKG)
+        if (i == null) { toast("没装 Shizuku,先装它"); return }
+        startActivity(i)
+    }
+
     private fun refresh() {
         val a11y = EyesAndHands.instance != null
         val alive = Privileged.shizukuAlive()
@@ -174,12 +192,19 @@ class MainActivity : Activity() {
             appendLine("Shizuku 在运行          ${tick(alive)}")
             appendLine("Shizuku 已授权          ${tick(granted)}")
             appendLine("特权桥(造副屏/按键)   ${tick(Privileged.ready)}")
+            // 「未就绪」本身不告诉他该做什么。Shizuku 的服务每次重启手机都会没,
+            // 这是 Shizuku 的性质不是这个 app 的毛病 —— 但不说出来,机主只会看到
+            // 一个点不动的授权按钮。
+            if (!alive) appendLine("Shizuku 每次重启手机都要重开一次:点下面那个按钮进去,用「通过无线调试启动」")
         }
+        shizukuBtn.text = if (alive) "授权 Shizuku" else "打开 Shizuku 去启动它"
         if (alive && granted && !Privileged.ready) {
             thread { Privileged.connect(this); runOnUiThread { refresh() } }
         }
     }
 
     private fun tick(b: Boolean) = if (b) "已就绪" else "未就绪"
+
+    private companion object { const val SHIZUKU_PKG = "moe.shizuku.privileged.api" }
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 }
