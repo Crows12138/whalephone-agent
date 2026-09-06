@@ -82,6 +82,17 @@ owner_types() {
   sh input -d 0 keyevent 62 >/dev/null 2>&1
 }
 
+# 让机主「打拼音但不上屏」—— 中文输入的常态,也是让路判据最容易看漏的状态:
+# 输入框内容一个字都不变(讯飞把拼音留在自己窗口里,连 setComposingText 都不调),
+# 人却确确实实在输入。少了这条,测试里所有「机主在打字」都是英文式的
+# (每敲一下都上屏、指纹每次都变),测不出中文用户真正会遇到的那一种。
+owner_composes() {
+  for c in $(echo "${1:-nihao}" | grep -o .); do
+    sh input -d 0 text "$c" >/dev/null 2>&1
+    python -c "import time;time.sleep(0.3)"
+  done
+}
+
 # 给 app 发广播。必须带 -p。
 #
 # 无障碍关着的时候(A11yGate 收工后就是这个状态),EyesAndHands 里的动态接收器

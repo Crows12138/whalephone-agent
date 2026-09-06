@@ -34,4 +34,10 @@ interface IShellBridge {
      * 前者该重造,后者重造就是白白多抢一次焦点、多收一次机主的键盘。
      */
     boolean displayAlive(int displayId) = 5;
+
+    /**
+     * 改这块屏的输入法策略(0=本屏弹 1=弹到主屏 2=不弹),返回改完之后的实际值,读不到返回 -99。
+     * 单独暴露出来是因为三个取值各有各的代价,只能在真机上量,不能纸上定。
+     */
+    int setImePolicy(int displayId, int policy) = 6;
 }

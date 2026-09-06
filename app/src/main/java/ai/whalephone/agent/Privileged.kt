@@ -49,7 +49,7 @@ object Privileged {
             .debuggable(false)
             // AIDL 一改就要升版本号,否则 Shizuku 会复用旧的 user service 进程 ——
             // 那个进程里没有新方法,调用会直接抛。
-            .version(3)
+            .version(4)
 
         Shizuku.bindUserService(args, object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -123,6 +123,10 @@ object Privileged {
     /** 这块副屏还在吗。问属主 —— app 自己看不见私有虚拟屏,见 AIDL 里的说明。 */
     fun displayAlive(displayId: Int): Boolean =
         runCatching { bridge?.displayAlive(displayId) == true }.getOrDefault(false)
+
+    /** 改副屏的输入法策略(0=本屏弹 1=弹到主屏 2=不弹)。返回改完的实际值,失败 -99。 */
+    fun setImePolicy(displayId: Int, policy: Int): Int =
+        runCatching { bridge?.setImePolicy(displayId, policy) ?: -99 }.getOrDefault(-99)
 
     fun createAgentDisplay(w: Int, h: Int, dpi: Int, surface: Surface): Int =
         bridge?.createDisplay(w, h, dpi, surface, ShellBridge.AGENT_DISPLAY_FLAGS) ?: -1

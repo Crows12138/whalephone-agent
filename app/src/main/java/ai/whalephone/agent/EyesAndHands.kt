@@ -9,6 +9,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.SparseLongArray
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 private const val TAG = "WPEyes"
 
@@ -42,6 +44,11 @@ class EyesAndHands : AccessibilityService() {
                 ACT_TEXT  -> setText(d, i.getIntExtra("index", -1), i.getStringExtra("text") ?: "")
                 ACT_BRIDGE -> Thread { bridgeSelfTest() }.start()
                 ACT_TYPING -> Thread { typingCheck() }.start()
+                ACT_IMETREE -> Thread { imeTree() }.start()
+                ACT_IMEPOL -> Thread {
+                    Log.i(TAG, "副屏 $d 输入法策略改成 ${i.getIntExtra("policy", 2)}," +
+                        "结果 ${Privileged.setImePolicy(d, i.getIntExtra("policy", 2))}")
+                }.start()
                 ACT_YIELD -> Thread { yieldCheck() }.start()
                 ACT_RUN -> {
                     val g = i.getStringExtra("goal").orEmpty()
@@ -83,6 +90,7 @@ class EyesAndHands : AccessibilityService() {
                 addAction(ACT_DUMP); addAction(ACT_SNAP); addAction(ACT_CLICK)
                 addAction(ACT_TEXT); addAction(ACT_BRIDGE); addAction(ACT_CONFIG); addAction(ACT_RUN)
                 addAction(ACT_TYPING); addAction(ACT_YIELD)
+                addAction(ACT_IMETREE); addAction(ACT_IMEPOL)
             },
             Context.RECEIVER_EXPORTED,
         )
@@ -118,20 +126,24 @@ class EyesAndHands : AccessibilityService() {
         private set
 
     /**
-     * 机主那块屏上,输入法自己的窗口最近几次动静的时刻(环形缓冲,只留最近 16 次)。
+     * 机主那块屏上,输入法自己的窗口最后一次动的时刻。
      *
      * 为什么需要这条:微信这类 App 把无障碍内容挡掉了 —— 窗口看得见,树是空的,
      * 读不到机主正在编辑的输入框。而那正是机主最常打字的地方。输入法是**另一个进程**,
-     * 它的窗口照样报事件:每敲一下,候选栏、按键预览都在变。实测敲 3 下 = 23 条事件,
-     * 键盘弹着不打字 30 秒 = 2 条。两个数量级的差,够用来判「有没有人在敲」。
+     * 它的窗口照样报事件:每敲一下,候选栏、按键预览都在变。实测敲一个字母约 2 条,
+     * 键盘弹着不打字 30 秒共 2 条。
      *
      * 只认输入法这个包,不认整块屏:整块屏上时钟、通知也会发事件。
      */
-    private val imeEvt = LongArray(16)
-    private var imeEvtIdx = 0
+    @Volatile var ownerImeLastAt = 0L
+        private set
 
     /** 当前输入法的包名。机主中途换输入法的话这条信号会哑掉 —— 哑掉就退回保守行为。 */
     private var imePkg: String? = null
+
+    /** 最近几次动静的时刻(环形缓冲)。只给 TYPING 探针看频率用,判据不看频率。 */
+    private val imeEvt = LongArray(16)
+    private var imeEvtIdx = 0
 
     /** [since] 之后,输入法窗口动过几次 */
     fun ownerImeEventsSince(since: Long): Int =
@@ -144,8 +156,11 @@ class EyesAndHands : AccessibilityService() {
         // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
         if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${e.packageName} " +
             AccessibilityEvent.eventTypeToString(e.eventType))
-        if (e.displayId == Conflict.USER_DISPLAY && e.packageName?.toString() == imePkg)
-            synchronized(imeEvt) { imeEvt[imeEvtIdx++ % imeEvt.size] = SystemClock.uptimeMillis() }
+        if (e.displayId == Conflict.USER_DISPLAY && e.packageName?.toString() == imePkg) {
+            val t = SystemClock.uptimeMillis()
+            ownerImeLastAt = t
+            synchronized(imeEvt) { imeEvt[imeEvtIdx++ % imeEvt.size] = t }
+        }
         // 机主那块屏上窗口结构变过 —— 让路判据拿它当「机主动过」的第二个检测器
         // (第一个是输入框指纹)。为什么需要两个,见 Conflict.ownerStillAtIt。
         if (e.displayId == Conflict.USER_DISPLAY &&
@@ -284,6 +299,36 @@ class EyesAndHands : AccessibilityService() {
      * 单独测这一条的理由和 typingCheck 一样 —— 从整轮任务里反推不出来。
      * 任务跑完发现键盘没被收起,可能是闸门起作用了,也可能是那一轮机主压根没打字。
      */
+    /**
+     * 把机主那块屏上输入法窗口的节点树打出来。
+     *
+     * 存在的理由是一个反复冒出来的念头:「让路判据要是能看见机主没上屏的那串拼音就好了」。
+     * 这条路走不通,而且不通的方式很容易被误判成「我姿势不对」—— 窗口是读得到的
+     * (`w.root` 非空、包名对),只是里面几乎什么都没有。留着这个探针,是为了下次
+     * 换一台机器 / 换一个输入法时,一条广播就能重新确认,而不是靠记忆。
+     *
+     * 实测(SM-S721B / One UI 8):讯飞整棵树 1 个节点(「返回」);
+     * 三星自带键盘 95 个节点,工具栏和每个键帽都在,但候选区两家都没有。
+     */
+    private fun imeTree() {
+        val wins = windowsOnAllDisplays.get(0) ?: return
+        for (w in wins) {
+            if (w.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val r = w.root ?: run { Log.i(TAG, "IMETREE root=null"); return }
+            Log.i(TAG, "---- IMETREE pkg=${r.packageName} ----")
+            fun walk(n: AccessibilityNodeInfo?, d: Int) {
+                n ?: return
+                val t = n.text?.toString()
+                val c = n.contentDescription?.toString()
+                if (!t.isNullOrBlank() || !c.isNullOrBlank())
+                    Log.i(TAG, "  " + "  ".repeat(d) + "id=${n.viewIdResourceName} cls=${n.className} text=[$t] desc=[$c]")
+                for (k in 0 until n.childCount) walk(n.getChild(k), d + 1)
+            }
+            walk(r, 0)
+            Log.i(TAG, "---- IMETREE end ----")
+        }
+    }
+
     private fun yieldCheck() {
         Log.i(TAG, "---- YIELD ---- 开始等(机主在打字的话这里会卡住)")
         val t = Conflict.yieldWhileOwnerTypes(this)
@@ -346,5 +391,7 @@ class EyesAndHands : AccessibilityService() {
         const val ACT_YIELD = "ai.whalephone.agent.YIELD"
         const val ACT_CONFIG = "ai.whalephone.agent.CONFIG"
         const val ACT_RUN = "ai.whalephone.agent.RUN"
+        const val ACT_IMETREE = "ai.whalephone.agent.IMETREE"
+        const val ACT_IMEPOL = "ai.whalephone.agent.IMEPOL"
     }
 }

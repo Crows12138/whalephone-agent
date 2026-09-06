@@ -29,6 +29,7 @@ class ShellBridge : IShellBridge.Stub {
 
     /** WindowManager.LayoutParams.DISPLAY_IME_POLICY_HIDE —— 这块屏不显示输入法 */
     private val DISPLAY_IME_POLICY_HIDE = 2
+    private val POLICY_UNREADABLE = -99
 
     override fun destroy() {
         synchronized(displays) {
@@ -93,25 +94,26 @@ class ShellBridge : IShellBridge.Stub {
      * 权限上能不能设通,文档查不到,只能试;设不通就照旧,不影响别的。
      */
     private fun hideImeOn(displayId: Int) {
-        runCatching {
-            val wm = Class.forName("android.view.WindowManagerGlobal")
-                .getMethod("getWindowManagerService").invoke(null)!!
-            val before = runCatching {
-                wm.javaClass.getMethod("getDisplayImePolicy", Int::class.javaPrimitiveType)
-                    .invoke(wm, displayId)
-            }.getOrNull()
-            wm.javaClass.getMethod(
-                "setDisplayImePolicy", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-                .invoke(wm, displayId, DISPLAY_IME_POLICY_HIDE)
-            val after = runCatching {
-                wm.javaClass.getMethod("getDisplayImePolicy", Int::class.javaPrimitiveType)
-                    .invoke(wm, displayId)
-            }.getOrNull()
-            Log.i(TAG, "副屏 $displayId 输入法策略 $before -> $after(2=不弹输入法)")
-        }.onFailure {
-            Log.w(TAG, "设不了副屏输入法策略,副屏上的输入框可能会把机主的键盘顶出来", it)
-        }
+        val got = setImePolicy(displayId, DISPLAY_IME_POLICY_HIDE)
+        if (got == POLICY_UNREADABLE)
+            Log.w(TAG, "设不了副屏输入法策略,副屏上的输入框可能会把机主的键盘顶出来")
     }
+
+    override fun setImePolicy(displayId: Int, policy: Int): Int = runCatching {
+        val wm = Class.forName("android.view.WindowManagerGlobal")
+            .getMethod("getWindowManagerService").invoke(null)!!
+        fun read() = runCatching {
+            wm.javaClass.getMethod("getDisplayImePolicy", Int::class.javaPrimitiveType)
+                .invoke(wm, displayId) as Int
+        }.getOrDefault(POLICY_UNREADABLE)
+        val before = read()
+        wm.javaClass.getMethod(
+            "setDisplayImePolicy", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .invoke(wm, displayId, policy)
+        val after = read()
+        Log.i(TAG, "副屏 $displayId 输入法策略 $before -> $after(0=本屏弹 1=弹到主屏 2=不弹)")
+        after
+    }.getOrElse { Log.w(TAG, "设不了副屏 $displayId 的输入法策略", it); POLICY_UNREADABLE }
 
     override fun releaseDisplay(displayId: Int) {
         synchronized(displays) { displays.remove(displayId) }?.release()

@@ -422,7 +422,9 @@ object Conflict {
         val up = imeUpForOwner(svc)
         val b = SystemClock.uptimeMillis()
         if (b - a > tIme) tIme = b - a
-        if (!up) return false
+        // 键盘落下就是这一次输入结束了 —— 没上屏的东西已经没了或者已经上屏了,
+        // 「他手里可能攥着没上屏的字」这个前提随之失效,会话状态清零。
+        if (!up) { ownerKeyedThisSession = false; fpSeenOnce = false; return false }
         val r = ownerStillAtIt(svc)
         val c = SystemClock.uptimeMillis()
         if (c - b > tFp) tFp = c - b
@@ -457,9 +459,10 @@ object Conflict {
      * 算,让路会彻底失效,而日志一片正常、指标一片漂亮。这个项目已经在静默失效上
      * 栽过两次(数「字有没有丢」、TYPING 探针自己重算判据),宁可退回只看状态的旧行为。
      *
-     * 阈值是个取舍,如实说清:10 秒里输入框一动不动,更像是人走开了而不是在措辞。
-     * 判错的代价是键盘被收起一次(草稿还在,点回输入框能接着打);不判的代价是
-     * agent 在这种状态下完全不工作。可以用 TYPING_IDLE_MS 调。
+     * 「多久算停手」是两档,不是一个数 —— 见 idleMs。一个数栽过一次:机主打拼音、
+     * 字还没上屏,盯着候选栏想选哪个词,10 秒一到判据就判他停手,副屏一造出来,
+     * 机主的键盘被收、没上屏的拼音被当场提交(真机复现 3/3)。
+     * 「有没有没上屏的内容」这件事外面读不到,只能靠「他按过键没有」来分档。
      */
     private fun ownerStillAtIt(svc: AccessibilityService): Boolean {
         val now = SystemClock.uptimeMillis()
@@ -468,11 +471,17 @@ object Conflict {
         // 检测器一:输入法自己的窗口在动。
         //
         // 这条最通用 —— 输入法是另一个进程,前台 App 挡不挡无障碍都影响不到它,
-        // 而每敲一下候选栏、按键预览都在变。实测敲 3 下 23 条事件,键盘弹着不打字
-        // 30 秒 2 条,两个数量级。微信这类把内容挡掉的 App 只剩这一条能用,
+        // 而每敲一下候选栏、按键预览都在变。微信这类把内容挡掉的 App 只剩这一条能用,
         // 而那恰恰是机主最常打字的地方,所以它不是兜底,是主力,每次都查。
-        val busy = EyesAndHands.instance?.ownerImeEventsSince(now - 5_000) ?: 0
-        if (busy >= IME_BUSY) { imeArmed = true; active = true; nIme++ }
+        //
+        // 看的是「最后一次动的时刻」,不是「五秒内动了几次」。原来用频率(5 秒 3 条),
+        // 真机上量到打一个字母只发约 2 条 —— 打得慢一点就永远凑不够,判据当场判他停手。
+        // 频率阈值同时还在偷偷承担「打得快不快」的判断,而那个判断和「他停没停手」无关。
+        val imeAt = EyesAndHands.instance?.ownerImeLastAt ?: 0L
+        if (imeAt > imeSeenAt) {
+            imeSeenAt = imeAt; imeArmed = true; ownerKeyedThisSession = true
+            active = true; nIme++
+        }
 
         // 检测器二:机主的输入框内容或光标变了。比检测器一精确,但要 App 肯给。
         val fp = ownerEditorFingerprint(svc)
@@ -481,7 +490,11 @@ object Conflict {
             fpReadable = false; fpLast = null; nBlind++
         } else {
             fpReadable = true
-            if (fp != fpLast) { fpLast = fp; active = true; nFp++ }
+            if (fp != fpLast) {
+                fpLast = fp; active = true; nFp++
+                // 第一次指纹变化是「刚看到这个输入框」,不是「他按了键」,不能算。
+                if (fpSeenOnce) ownerKeyedThisSession = true else fpSeenOnce = true
+            }
         }
 
         if (active) { fpChangedAt = now; idleLogged = false; return true }
@@ -505,7 +518,9 @@ object Conflict {
         if (idle < idleMs(svc)) return true
         if (!idleLogged) {
             idleLogged = true
-            Log.i("WPConflict", "键盘还开着,但 ${idle / 1000} 秒没人动过 —— 按机主已经停手算")
+            Log.i("WPConflict", "键盘还开着,但 ${idle / 1000} 秒没人动过" +
+                (if (ownerKeyedThisSession) "(这次他按过键,已经多等到 ${idleMs(svc) / 1000} 秒)" else "") +
+                " —— 按机主已经停手算")
         }
         return false
     }
@@ -539,11 +554,29 @@ object Conflict {
         null
     }.getOrNull()
 
-    /** 五秒内输入法窗口动几次算「有人在敲」。实测:敲一下约 7 条,静置 30 秒共 2 条。 */
-    private const val IME_BUSY = 3
-
     private var fpLast: String? = null
     private var fpChangedAt = 0L
+
+    /** 已经消费掉的最后一条输入法事件时刻。比它新的才算「又有键落下」。 */
+    private var imeSeenAt = 0L
+
+    /**
+     * 这一次键盘弹起期间,机主到底有没有按过键。
+     *
+     * 靠的是「输入法窗口发了带包名的内容变化事件」。实测这台机器上,键盘**弹起**
+     * 本身不发这种事件(弹起走的是 TYPE_WINDOWS_CHANGED,那条不带包名),
+     * 只有真敲下去才发 —— 两者因此分得开。换一台机器上如果输入法弹起也发,
+     * 这个标志会一直是 true,判据退化成只有 60 秒那一档:更保守,不会更激进。
+     *
+     * 清零只发生在判据**看到**键盘落下的那一刻,而判据只在让路时才跑。
+     * 两次任务之间键盘起起落落没人看,标志会残留 —— 残留同样只会让它多等,
+     * 所以不去补这个洞(补的话要在无障碍回调里每次 WINDOWS_CHANGED 都枚举一遍窗口,
+     * 那条回调滚一次信息流就上千次,不值)。
+     */
+    @Volatile private var ownerKeyedThisSession = false
+
+    /** 这一次键盘弹起期间,输入框指纹读到过没有 —— 第一次读到不算「他按了键」 */
+    private var fpSeenOnce = false
 
     /** 输入法那条信号在这台机器上证明过自己能用了吗 */
     @Volatile private var imeArmed = false
@@ -554,8 +587,31 @@ object Conflict {
     /** 这台机器上活动信号能不能用(两条任一可用即可)。都用不了就退回只看状态。 */
     private fun signalArmed() = fpReadable || imeArmed
 
+    /**
+     * 键盘还开着、但一直没动静,等多久算「机主停手了」。分两档,因为这是两种情形:
+     *
+     *   机主一个键都没按过 —— 输入框自动获焦、键盘自己弹出来的居多(聊天页一进去就这样)。
+     *                        他手里没有任何没上屏的东西,判错的代价只是键盘收一下。10 秒。
+     *
+     *   机主按过键         —— 他手里**可能攥着一串没上屏的字**。中文输入必然经过这个阶段:
+     *                        拼音打进去了、词还没选。实测这个阶段从外面完全看不见 ——
+     *                        讯飞把拼音留在自己窗口里,连 setComposingText 都不调
+     *                        (IMMS 的 mCursorCandStart 恒为 -1);输入法窗口的无障碍树
+     *                        只有一个「返回」按钮;窗口几何组词前后一模一样。
+     *                        既然状态读不到,就只能按时间放宽:60 秒。
+     *
+     * 60 秒不是拍的:活动信号在这台机器上万一全哑掉,判据会退回只看状态,那条路的
+     * 让路上限本来就是 60 秒。取同一个数,「信号可用」和「信号不可用」两种情况下,
+     * 一个已经开始打字的机主至少都有 60 秒的安静时间,不会因为某条检测器失灵而变短。
+     *
+     * 代价说清楚:机主打了几个字就把手机放下、键盘还开着,agent 会白等 60 秒。
+     * 等待是可见的(写在这一步的结果里),打断不可逆 —— 所以往等的那头偏。
+     */
     private fun idleMs(svc: AccessibilityService): Long =
-        Config.get(svc, "TYPING_IDLE_MS", "10000").toLongOrNull() ?: 10_000L
+        if (ownerKeyedThisSession)
+            Config.get(svc, "DRAFT_IDLE_MS", "60000").toLongOrNull() ?: 60_000L
+        else
+            Config.get(svc, "TYPING_IDLE_MS", "10000").toLongOrNull() ?: 10_000L
 
     /** 只打一次「按停手算」的日志,免得 500 毫秒一轮刷屏 */
     @Volatile private var idleLogged = false
@@ -577,7 +633,9 @@ object Conflict {
         return "输入法窗口近 5 秒动了 $busy 次" +
             (if (imeArmed) "" else "(这条还没证明可用)") +
             ";输入框" + (fp?.let { "可读(${it.take(40)})" } ?: "读不到") +
-            ";距上次有人动过 $idle"
+            ";距上次有人动过 $idle" +
+            ";这次键盘期间机主" + (if (ownerKeyedThisSession) "按过键(容忍 " else "没按过键(容忍 ") +
+            "${idleMs(svc) / 1000} 秒安静)"
     }
 
     /** 判据的**状态**那一半:机主那块屏上有没有一个为他而开的输入法窗口。 */
@@ -681,8 +739,13 @@ object Conflict {
         val waited = SystemClock.uptimeMillis() - t0
         // 到点了他还在打,那这一下就是实打实的打扰。必须能在日志里一眼看见,
         // 不能和「他停手了我才动」混成同一条。
+        // 走的是哪一档要写在这一行里。等了多久之外,还得能一眼看出「凭什么认为他停手了」——
+        // 60 秒和 10 秒是两个完全不同的结论,混在一条日志里等于没说。
+        // 先取,再调 ownerTyping:后者看到键盘落下会把这个标志清掉。
+        val tier = if (ownerKeyedThisSession) "他这次按过键,等的是 ${idleMs(svc) / 1000} 秒那一档"
+                   else "他这次一个键都没按,等的是 ${idleMs(svc) / 1000} 秒那一档"
         val why = if (ownerTyping(svc)) "等到 ${cap / 1000} 秒上限,他还在打 —— 这一下会打断他"
-                  else "机主停手了,输入框已经 ${SystemClock.uptimeMillis() - fpChangedAt} 毫秒没动"
+                  else "机主停手了,输入框已经 ${SystemClock.uptimeMillis() - fpChangedAt} 毫秒没动($tier)"
         // 卡顿信息只在真卡了的时候才打。它是为了把「让得久」和「跑得慢」分开 ——
         // 探针路径上量到过 sleep(500) 实际睡 37 秒(没有前台服务时三星会限调度),
         // 不分开的话让路时长忽长忽短,会被当成判据出了问题去查。

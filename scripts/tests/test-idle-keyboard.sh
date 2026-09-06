@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # 让路判据的**活动**那一半:「键盘开着」和「机主在打字」不是一回事。
 #
-# 这个脚本测两个方向,少了任何一个方向的结论都是假的:
+# 这个脚本测四种情形,少了任何一种,结论都是假的:
 #
-#   A 机主停手了(键盘还开着) -> agent 应该在空闲阈值后放行,不是等满上限
-#   B 机主一直在打(超过原来的 60 秒上限) -> agent 应该一直让,不能到点动手
+#   A 机主敲过字然后停手      -> 放行,但要等长的那一档(他可能攥着没上屏的字)
+#   B 键盘开着、一个键没按过  -> 放行,等短的那一档(否则 agent 会被一块残留的键盘拖死)
+#   C 只打拼音、不上屏        -> 一直让。这是中文输入的常态,也是这套判据栽过的地方
+#   D 连打 75 秒              -> 全程让,不能到点动手
 #
-# 只测 A 会退化成「把阈值调小」,那等于放宽让路;只测 B 看不出停摆有没有解决。
-# 两个方向的读数都来自 YIELD 探针本身返回的毫秒数 —— 测的是上线的那个函数,
-# 不是它的副本。
+# 只测 A 会退化成「把阈值调小」,那等于放宽让路;只测 D 看不出停摆有没有解决;
+# 少了 B 看不出两档有没有分开;少了 C 就只测了英文式输入(每敲一下都上屏),
+# 而中文输入根本不长那样 —— 真机上就是从这个缺口漏出去的。
+# 所有读数都来自 YIELD 探针本身返回的毫秒数 —— 测的是上线的那个函数,不是它的副本。
 #
 # 用法: ANDROID_SERIAL=<设备> bash scripts/tests/test-idle-keyboard.sh
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 A=ai.whalephone.agent
-IDLE_MS="${IDLE_MS:-10000}"
+IDLE_MS="${IDLE_MS:-10000}"      # 一个键都没按过时的空闲阈值
+DRAFT_MS="${DRAFT_MS:-60000}"    # 按过键之后的空闲阈值(可能有没上屏的内容)
 PASS=0; FAIL=0
 # 判据自己算出来的「输入框多久没动」。这个量只由两个绝对时间戳决定,
 # 不受线程调度影响 —— 墙上时钟在这台机器上不可用(见下面 A 用例的注释)。
@@ -83,7 +87,7 @@ echo "   敲之后: $F2"
   no "敲了字但指纹没变 —— 注入没进输入框,后面测的是空气"; echo "== 结论:前提不成立,不往下测 =="; exit 1; }
 
 echo
-echo "== A. 机主停手,键盘留着 —— 应该在 $((IDLE_MS/1000)) 秒左右放行,不是 60 秒 =="
+echo "== A. 机主敲过字后停手 —— 应该等长的那一档($((DRAFT_MS/1000)) 秒),因为他可能攥着没上屏的字 =="
 [ "$(sh dumpsys input_method | grep -c 'mInputShown=true')" -gt 0 ] || { no "键盘掉了,A 测不了"; }
 sh logcat -c
 T0=$(date +%s%3N)
@@ -101,20 +105,78 @@ echo "   探针报告让了 $W 毫秒;$(why)"
 # 量出过 18 秒也量出过 70 秒。拿它当断言,过与不过取决于当时的调度,测不出算法。
 # 判据里的空闲时长是两个绝对时间戳相减,不受调度影响,它才是要卡的那个量。
 IDLE=$(idle_ms); [ -z "$IDLE" ] && IDLE=-1
-if [ "$IDLE" -ge "$IDLE_MS" ] && [ "$IDLE" -le $((IDLE_MS+25000)) ]; then
-  ok "按空闲阈值放行(判据算出空闲 ${IDLE} 毫秒,阈值 ${IDLE_MS};墙上等了 ${W} 毫秒,差额是线程被调度器拖的)"
-else
-  no "判据算出的空闲是 ${IDLE} 毫秒,期望 ${IDLE_MS}~$((IDLE_MS+25000))"
-fi
+# 只卡下界。上界不能卡:探针路径上 Thread.sleep(500) 实测被拉到过 48930 毫秒
+# (三星对后台线程的调度限制),空闲时长因此会超出阈值几十秒,超多少取决于当时的
+# 调度,和算法无关。「有没有走错档」这件事由下面那条日志断言,那条是精确的。
+[ "$IDLE" -ge "$DRAFT_MS" ] && ok "空闲 ${IDLE} 毫秒 ≥ 长档 ${DRAFT_MS}(墙上等了 ${W} 毫秒)"                             || no "空闲才 ${IDLE} 毫秒,不到长档 ${DRAFT_MS} —— 提前放行了"
+why | grep -q "按过键,等的是" && ok "放行日志写明了走长档:$(why | grep -oE "他这次[^)]*")"                               || no "放行日志没说走长档 —— 两档可能没分开"
 why | grep -q "机主停手了" && ok "放行的理由是机主停手,不是等到上限" \
                           || no "放行的理由不是机主停手"
 sh dumpsys input_method | grep -q "mInputShown=true" && ok "放行时机主的键盘还在(agent 让路不负责收键盘)" \
   || echo "   (键盘已经不在了,这一条不判)"
 
 echo
-echo "== B. 机主连打 75 秒 —— 全程都得让,不能到 60 秒上限就动手 =="
+echo "== B. 键盘开着但一个键都没按 —— 应该等短的那一档($((IDLE_MS/1000)) 秒)=="
+# 先让判据**看见**键盘落下,它才会把「这次他按过键」清掉。判据只在让路时才跑,
+# 所以专门打一发 YIELD 让它看一眼;键盘不在的时候这一发立刻返回。
 sh input -d 0 keyevent 4 >/dev/null 2>&1
-raise_ime || { echo "输入法没起来,B 测不了"; exit 1; }
+python -c "import time;time.sleep(1.5)"
+bc -a $A.YIELD >/dev/null 2>&1
+python -c "import time;time.sleep(2)"
+raise_ime || { echo "输入法没起来,B 测不了"; exit 1; }   # 只点输入框,不打字
+sh logcat -c
+bc -a $A.YIELD >/dev/null 2>&1
+for _ in $(seq 1 60); do
+  sh logcat -d -s WPEyes:* | grep -q "让了" && break
+  python -c "import time;time.sleep(1)"
+done
+W=$(waited_ms); [ -z "$W" ] && W=-1
+echo "   探针报告让了 $W 毫秒;$(why)"
+IDLE=$(idle_ms); [ -z "$IDLE" ] && IDLE=-1
+[ "$IDLE" -ge "$IDLE_MS" ] && ok "空闲 ${IDLE} 毫秒 ≥ 短档 ${IDLE_MS}"                            || no "空闲才 ${IDLE} 毫秒,不到短档 ${IDLE_MS}"
+# 走没走对档看日志,不看数字 —— 数字会被调度拖过 60000,那会误报成「走了长档」。
+why | grep -q "一个键都没按,等的是" && ok "放行日志写明了走短档:$(why | grep -oE "他这次[^)]*")"                                     || no "放行日志没说走短档 —— 两档没分开,agent 会被一块残留的键盘拖死"
+
+echo
+echo "== C. 只打拼音、不上屏 —— 输入框一个字都不变,但判据不能判他停手 =="
+# 这一条是真机上漏出去的那个洞:讯飞把拼音留在自己窗口里,输入框内容一个字不动,
+# 机主盯着候选栏想选哪个词的那十几秒,所有活动信号都是静的。
+sh input -d 0 keyevent 4 >/dev/null 2>&1
+raise_ime || { echo "输入法没起来,C 测不了"; exit 1; }
+sh logcat -c
+bc -a $A.YIELD >/dev/null 2>&1
+python -c "import time;time.sleep(1)"
+FP0=$(fp)
+owner_composes nihaoshijie          # 只打拼音,不按空格提交
+python -c "import time;time.sleep(1)"
+FP1=$(fp)
+# 前提:这一串确实**没有**上屏。上屏了的话测的就是 A,不是 C。
+ED0=$(echo "$FP0" | grep -oE "输入框[^;]*"); ED1=$(echo "$FP1" | grep -oE "输入框[^;]*")
+if [ "$ED0" = "$ED1" ]; then
+  ok "前提成立:打了一串拼音,输入框内容没变(没上屏)"
+else
+  no "拼音上屏了,这一轮测的不是「组词中」:$ED0 -> $ED1"
+fi
+echo "   盯着候选栏发呆 30 秒(远超短档的 $((IDLE_MS/1000)) 秒)"
+python -c "import time;time.sleep(30)"
+if sh logcat -d -s WPEyes:* | grep -q "让了"; then
+  no "30 秒里就放行了 —— 机主的拼音会被当场提交掉"
+else
+  ok "30 秒过去还在让(短档已经过了,长档在兜着)"
+fi
+echo "   等它自己放行"
+for _ in $(seq 1 90); do
+  sh logcat -d -s WPEyes:* | grep -q "让了" && break
+  python -c "import time;time.sleep(1)"
+done
+W=$(waited_ms); [ -z "$W" ] && W=-1
+echo "   探针报告让了 $W 毫秒;$(why)"
+if [ "$W" -ge "$DRAFT_MS" ]; then ok "总共让了 ${W} 毫秒,不小于长档 ${DRAFT_MS}"
+else no "只让了 ${W} 毫秒"; fi
+echo
+echo "== D. 机主连打 75 秒 —— 全程都得让,不能到 60 秒上限就动手 =="
+sh input -d 0 keyevent 4 >/dev/null 2>&1
+raise_ime || { echo "输入法没起来,D 测不了"; exit 1; }
 sh logcat -c
 bc -a $A.YIELD >/dev/null 2>&1
 python -c "import time;time.sleep(1)"
@@ -129,11 +191,11 @@ for _ in $(seq 1 60); do
 done
 W=$(waited_ms); [ -z "$W" ] && W=-1
 echo "   探针报告让了 $W 毫秒;$(why)"
-[ "$W" -ge 70000 ] && ok "连续打字期间一直在让(${W} 毫秒 > 原来的 60 秒上限)" \
+[ "$W" -ge $((75000+DRAFT_MS-15000)) ] && ok "连续打字期间一直在让(${W} 毫秒 = 75 秒打字 + 长档等待)" \
                    || no "只让了 ${W} 毫秒 —— 机主还在打字就动手了"
 IDLE=$(idle_ms); [ -z "$IDLE" ] && IDLE=-1
-[ "$IDLE" -ge "$IDLE_MS" ] && ok "放行时输入框确实已经 ${IDLE} 毫秒没动" \
-                           || no "放行时输入框才 ${IDLE} 毫秒没动,不够阈值 ${IDLE_MS}"
+[ "$IDLE" -ge "$DRAFT_MS" ] && ok "放行时输入框确实已经 ${IDLE} 毫秒没动" \
+                            || no "放行时输入框才 ${IDLE} 毫秒没动,不够长档 ${DRAFT_MS}"
 why | grep -q "机主停手了" && ok "放行的理由是机主停手,不是等到上限" \
                           || no "放行的理由是等到上限 —— 那一下会打断他"
 
