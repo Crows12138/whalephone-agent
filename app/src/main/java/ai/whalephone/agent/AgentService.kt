@@ -295,10 +295,18 @@ class AgentService : Service() {
         idle.postDelayed(settle, ms)
     }
 
-    /** 真收工。副屏仍然留着(只有机主点停止才销毁),但服务不再占着前台 */
+    /**
+     * 真收工。副屏仍然留着(只有机主点停止才销毁),但服务不再占着前台。
+     *
+     * 上下文在这里清掉,而不是留给进程被回收时自然消失:那个时刻不由我们定,
+     * 可能收摊两小时后进程还活着,机主再说一句,它带着两小时前的上下文 ——
+     * 而通知早就没了。上下文的寿命就等于保温期的寿命,这样「还连着没有」
+     * 这件事和机主屏幕上看得见的东西是一致的。
+     */
     private fun settleNow() {
         idle.removeCallbacks(settle)
-        Log.i(TAG, "保温到点,收摊")
+        recent.clear()
+        Log.i(TAG, "保温到点,收摊(上下文一起清掉)")
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
