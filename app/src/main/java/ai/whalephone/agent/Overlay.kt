@@ -508,7 +508,9 @@ class Ball(
             setImageResource(R.drawable.ic_whale)
             imageTintList = android.content.res.ColorStateList.valueOf(pal.onAccent)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            val p = Ui.dp(ctx, 12f)
+            // 留白比一般图标按钮小:鲸尾是个扁的形状,按 24 格等比缩进去之后
+            // 上下本来就空着一截,再多留白它在球里就只剩一点点
+            val p = Ui.dp(ctx, 8f)
             setPadding(p, p, p, p)
             background = Ui.ovalGradient(pal.ballFrom, pal.ballTo)
             elevation = Ui.dp(ctx, 8f).toFloat()
