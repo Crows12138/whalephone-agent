@@ -67,6 +67,12 @@ class MainActivity : Activity() {
             text = "打开无障碍设置"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         })
+        // 这个 Intent 只到得了无障碍首页,而本 app 的服务在二级页里,机主找不到。
+        // 想直接跳到那一项要用 ACTION_ACCESSIBILITY_DETAILS_SETTINGS —— 它需要
+        // OPEN_ACCESSIBILITY_DETAILS_SETTINGS,实测这台机器上是 signature|installer,
+        // 普通 app 拿不到。二级页本身在这台 ROM 上也没有独立 Activity(是首页里的
+        // 一个 fragment),深链只能靠 ROM 私有参数,换台机器就断。所以老老实实写路径。
+        root.addView(label("手动开的话:设置 → 辅助功能 → 已安装的应用程序 → WhalePhone Agent"))
 
         root.addView(label("LLM 接口(OpenAI 兼容)"))
         val base = field(Config.KEY_BASE_URL, "https://api.deepseek.com/v1", "https://api.deepseek.com/v1")
@@ -187,8 +193,17 @@ class MainActivity : Activity() {
         val a11y = EyesAndHands.instance != null
         val alive = Privileged.shizukuAlive()
         val granted = Privileged.shizukuGranted()
+        // 无障碍平时**本来就是关的** —— A11yGate 在开工时自己开、收工自己关,
+        // 这样机主不干活的时候不会因为挂着一个能点击的无障碍服务而付不了微信。
+        // 所以这一行显示「未就绪」是在把正常静息状态报成故障:机主会去找哪里坏了,
+        // 而实际上没有任何东西要他处理。能自动开的时候就得这么说。
+        val autoA11y = Config.get(this, A11yGate.KEY_AUTO, "1") != "0" && Privileged.ready
         status.text = buildString {
-            appendLine("无障碍服务(眼睛和手)  ${tick(a11y)}")
+            appendLine("无障碍服务(眼睛和手)  " + when {
+                a11y -> "已就绪"
+                autoA11y -> "开工时自动开(不常驻)"
+                else -> "未就绪"
+            })
             appendLine("Shizuku 在运行          ${tick(alive)}")
             appendLine("Shizuku 已授权          ${tick(granted)}")
             appendLine("特权桥(造副屏/按键)   ${tick(Privileged.ready)}")
