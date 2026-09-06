@@ -146,9 +146,15 @@ shell 侧的动作:
 真机这一夜没出现,但**演示前重启一次手机**更稳妥。查看:
 `adb shell dumpsys input_method | grep -c ClientState`。
 
-**反复改 user service 版本号会留下一堆 `:bridge` 进程。** Shizuku 按
-(包名, 类名, 版本, tag) 认 user service,版本一变就起一个新的,旧的还在。
-攒到三个的时候连着两轮任务下发之后 app 那边一行日志都没有(广播像是没到),
-杀光 `ai.whalephone.agent*` 进程再跑就正常。只观察到相关性,没深挖 ——
-正常使用不会改版本号,碰不到。
-`adb shell ps -A | grep whalephone` 看有几个。
+**`:bridge` 孤儿进程会让任务静默不启动 —— 已修,但值得知道它长什么样。**
+原来这条记的原因是错的(以为是「反复改 user service 版本号」)。真正的原因常见得多:
+**任何一次 `am force-stop`**。桥是 Shizuku 用 shell 身份起的独立进程,force-stop 杀不到它;
+app 死过一次之后再来绑,Shizuku 不复用那个孤儿,会再起一个 —— 每 force-stop 一次漏一个
+(实测 force-stop + 一个任务,桥从 1 变 2,每轮 +1)。而测试脚本每个用例都在 force-stop。
+
+攒到两三个之后的现象是:广播发出去,`WPSvc`/`WPAgent` 一行日志都没有,脚本照样跑完
+给出一份干净的读数。今天在测试里连撞三次才定位到。
+
+现在新桥启动时会自己把同名孤儿收掉(`ShellBridge.reapOrphans`,日志「收掉了 N 个残留的
+桥进程」)。看还有几个:`adb shell ps -A | grep :bridge` —— **正常只应该有 1 个**,
+多于 1 个说明这条修复没生效,别继续跑测试。

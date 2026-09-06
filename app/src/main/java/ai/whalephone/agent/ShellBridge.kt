@@ -25,7 +25,37 @@ class ShellBridge : IShellBridge.Stub {
         // 构造发生在 user service 进程的主线程,那里有 Looper。先把 Context 拿到缓存里,
         // 后面 binder 线程上的调用就不用再碰 ActivityThread 了。
         runCatching { ctx() }.onFailure { Log.w(TAG, "预热 Context 失败,留给首次调用重试", it) }
+        reapOrphans()
     }
+
+    /**
+     * 把同名的旧桥进程收掉,只留自己。
+     *
+     * 桥不是 app 的进程,是 Shizuku 用 shell 身份起的独立进程 —— **app 被 force-stop
+     * 杀不掉它**;而 app 死过一次之后再来绑,Shizuku 不会复用那个孤儿,会再起一个。
+     * 实测:force-stop 之后跑一个任务,桥从 1 个变 2 个,每轮 +1。
+     *
+     * 攒到两三个之后的现象是**任务静默不启动**:广播发出去,日志一行都没有,
+     * 脚本照样跑完给出一份干净的读数。今天在测试里连撞三次才定位到。
+     * 这个项目最不能出的就是这种错,所以宁可在这里多做一步。
+     *
+     * 试过更斯文的做法:绑之前调 `Shizuku.unbindUserService(args, null, remove=true)`。
+     * 无效 —— 没绑的状态下 Shizuku 不认,孤儿照样在。所以改成自己动手。
+     * 杀的全是本 app 自己的进程,而且这一步跑在新桥启动时,那时旧的一定没人在用。
+     */
+    private fun reapOrphans() = runCatching {
+        val me = android.os.Process.myPid()
+        val out = ProcessBuilder("ps", "-A", "-o", "PID,NAME").redirectErrorStream(true)
+            .start().inputStream.bufferedReader().use(BufferedReader::readText)
+        var n = 0
+        for (line in out.lineSequence()) {
+            if (!line.trimEnd().endsWith(":bridge")) continue
+            val pid = line.trim().substringBefore(' ').toIntOrNull() ?: continue
+            if (pid == me) continue
+            android.os.Process.killProcess(pid); n++
+        }
+        if (n > 0) Log.i(TAG, "收掉了 $n 个残留的桥进程(force-stop 杀不到它们)")
+    }.onFailure { Log.w(TAG, "清理残留桥进程失败,不影响本次工作", it) }
 
     /** WindowManager.LayoutParams.DISPLAY_IME_POLICY_HIDE —— 这块屏不显示输入法 */
     private val DISPLAY_IME_POLICY_HIDE = 2

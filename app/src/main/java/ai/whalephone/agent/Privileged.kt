@@ -49,8 +49,10 @@ object Privileged {
             .debuggable(false)
             // AIDL 一改就要升版本号,否则 Shizuku 会复用旧的 user service 进程 ——
             // 那个进程里没有新方法,调用会直接抛。
-            .version(4)
+            .version(5)
 
+        // 残留的旧桥进程由新桥自己收掉,见 ShellBridge.reapOrphans ——
+        // 这里试过 Shizuku.unbindUserService(args, null, remove=true),没绑的状态下无效。
         Shizuku.bindUserService(args, object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 bridge = binder?.let { IShellBridge.Stub.asInterface(it) }
