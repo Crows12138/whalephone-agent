@@ -1623,3 +1623,122 @@ Calling …hideSoftInput(…) for reason: HIDE_DISPLAY_IME_POLICY_HIDE
 
 顺带记:三个策略值(0=本屏弹 / 1=弹到主屏 / 2=不弹)现在可以在运行时改了
 (`IShellBridge.setImePolicy`),不用重新造屏就能做对照。上面那张 12 次的表就是这么量的。
+
+---
+
+# 机主这一侧:界面、副屏取景窗、悬浮球(2026-09-06 晚)
+
+原来机主能看到的只有两样:一屏配置表单,和一条通知。「它到底有没有在动」这个最该被
+回答的问题,答案只在 logcat 里。这一轮把机主那一侧补齐:对话流界面、副屏取景窗、
+悬浮球(带语音)。三样都是**可关的**,关掉之后行为和以前一模一样。
+
+三条都撞到了值得记的系统行为。
+
+## 一、副屏画面搬到主屏:每帧 10 MB 的分配换成 10 MB 的拷贝
+
+取景窗按 5 帧/秒读 `AgentDisplay` 的 ImageReader。原来的 `capture()` 每次
+`Bitmap.createBitmap` 一张 1080x2340 ARGB —— 10 MB。5 帧/秒就是 50 MB/s 的垃圾,
+GC 会把机主那块屏一起卡住,而这个 app 的全部意义就是不卡他。
+
+所以连续取帧单独走一条 `captureLive()`:复用同一张位图,只 `copyPixelsFromBuffer`。
+返回的位图下一帧就被覆盖,只能当场画掉 —— 这个约束写在方法注释里,一次性截图仍然
+走原来那条。两条都加了 `@Synchronized`:取景窗和演示取景线程会同时 `acquireLatestImage`,
+ImageReader 的 maxImages 是 2,两边一起抢会抛 IllegalStateException。
+
+## 二、agent 在副屏上打开「设置」,机主主屏上的所有悬浮窗会消失
+
+这条是意外撞到的,而且很值得记 —— 它是一类新的跨屏干扰。
+
+现象:两个悬浮窗都开着,派一个「打开设置」的任务,任务跑起来之后悬浮球和取景窗
+**同时从主屏上消失**,而界面上的开关还显示「开」。
+
+查下来窗口都还在,坐标也对:
+
+```
+Window #10 ... mDisplayId=0  mAttrs={(680,253)(367x879) ty=APPLICATION_OVERLAY
+  mViewVisibility=0x0 mHasSurface=true isReadyForDisplay()=false
+  isVisible=false
+```
+
+`mViewVisibility` 是 VISIBLE、`mHasSurface` 为真,但 `isReadyForDisplay()` 为假 ——
+这是被**策略**藏起来了,不是我们自己隐藏的。把副屏上的设置 force-stop 掉,两个窗口
+当场都回来了。
+
+结论:设置这类页面会设 `HIDE_NON_SYSTEM_OVERLAY_WINDOWS`(防覆盖攻击的标准做法),
+**而这个标志是全局的,不分显示器**。agent 在一块机主看不见的屏上打开设置,后果落在
+机主那块屏上:他自己的悬浮窗(我们的,以及任何第三方浮窗工具)一起消失。
+
+这是第十类资源竞争,而且**没法绕过** —— 那个标志的存在意义就是不许被绕过。
+能做的只有如实说明:agent 开设置类页面的那段时间里,你的浮窗会暂时不见,任务结束就回来。
+
+## 三、悬浮球里录音:权限给了也录不上,要把前台服务类型临时升成 microphone
+
+悬浮球的语音输入用 `SpeechRecognizer`(进程内),不用 `RecognizerIntent` ——
+后者会拉起一个全屏识别界面,那是一次真正的界面打断,和这个 app 的立场相反。
+
+第一次测:权限明明给了,识别器直接报错。appops 里读出来是
+
+```
+Uid mode: RECORD_AUDIO: foreground
+RECORD_AUDIO: allow; rejectTime=+2s426ms ago
+```
+
+`allow` 但 **foreground 模式** —— 只有进程状态够前台才真的放行,而「有一个悬浮窗」
+不算前台。识别器那边只回一个 `ERROR_INSUFFICIENT_PERMISSIONS`,看着像没给权限,
+其实权限早给了。这类「读数指向错误原因」的失败最费时间,所以记下来。
+
+修法是在识别的那几秒把悬浮窗服务的前台类型升成 microphone
+(`startForeground(id, noti, SPECIAL_USE or MICROPHONE)`),听完降回去。
+不常驻的理由:microphone 类型的前台服务会一直点亮系统的麦克风指示灯,而这个 app
+平时根本不用麦克风。
+
+改完实测:
+
+```
+RECORD_AUDIO: allow; time=+3s663ms ago; duration=+1s673ms
+```
+
+真的录到了 1.673 秒,识别器返回 no-match(当时没人说话),界面显示「没听清,再说一次」——
+整条链路通。**真正说话那一段没有验**,那要人对着手机说,只能机主自己试。
+
+## 四、悬浮窗不能抢焦点,这一条在代码里是硬约束
+
+主屏的焦点窗口一变,IMMS 就重算输入法目标,机主正在打的字会被收掉 ——
+这个 app 花最多力气解决的就是这件事。悬浮窗如果随手带上可获焦,等于从另一条路
+把它重做一遍。所以两个窗口都是 `FLAG_NOT_FOCUSABLE`,唯一的例外是机主主动点开
+输入栏要打字的那一刻,收起立刻还回去。
+
+展开时还要另外两个标志,少一个就出问题:
+
+- `FLAG_NOT_TOUCH_MODAL` —— 可获焦的窗口默认吃掉全屏触摸,而这条面板横贯屏宽,
+  不加的话机主点屏幕上任何地方都会被它接住。
+- `FLAG_WATCH_OUTSIDE_TOUCH` —— 点面板外面能收起。
+
+以及一条实测出来的:光把窗口设成可获焦,输入法**不会**为它弹出来
+(`mInputShown=false`)。要 `softInputMode = ADJUST_RESIZE or STATE_ALWAYS_VISIBLE`,
+再显式 `showSoftInput` 一次。
+
+面板展开时球自己藏起来、面板贴屏幕下沿。原来是「面板挂在球上方」,结果球会从右边
+跳到屏幕中间给面板让位置,看着像出了 bug;贴下沿还顺带解决了另一件事 ——
+输入法弹出来时面板正好被顶在键盘上面,不用自己去算键盘高度。
+
+## 回归:两个悬浮窗都开着,核心指标没变
+
+带着悬浮球 + 取景窗(5 帧/秒一直在拷贝位图)跑 `test-ime.sh`:
+
+```
+期间 ANR 次数        0
+机主实际敲下的字数  15
+打字期间键盘被收起  0
+agent 主动让路次数  1
+任务 done=true
+```
+
+和不开悬浮窗那一轮完全一致。
+
+## 没验到的
+
+- **开机自动恢复悬浮窗**(BootReceiver)。`BOOT_COMPLETED` 是受保护广播,adb 发不出去;
+  shell 也杀不动 app 进程,所以 START_STICKY 那条恢复路径同样没能触发。
+  代码写了、逻辑和手动开是同一条,但**没有在真机上跑通过**,下次重启手机时验。
+- **语音真的说话那一段**。录音、识别器回调、错误翻译都验了,只差有人对着手机说话。
