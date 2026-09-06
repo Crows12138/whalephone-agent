@@ -36,10 +36,21 @@ class Agent(
      * 不然模型永远只有一帧的记忆。
      */
     private val notes = mutableListOf<String>()
-    private var pendingQuestion: String? = null
 
-    /** 需要用户拍板时,回调出去(上层用通知承接,而不是弹窗抢屏) */
-    var onAsk: ((String) -> Unit)? = null
+    /**
+     * 机主对 ask 的回答。和 notes 一样每一轮都带上 —— trace 只留最近 8 条,
+     * 答案在长任务里会被挤掉,而它恰恰是后面每一步的前提。
+     */
+    private val answers = mutableListOf<Pair<String, String>>()
+
+    /**
+     * 需要机主拍板时回调出去,**返回他的回答**;返回 null 表示没人答(超时或任务被停)。
+     *
+     * 返回值不是可有可无的。ask 原来直接结束整个任务:机主看到一句问话,却没有任何
+     * 地方能回答 —— 界面上的输入框已经回到「下新任务」,而这边 trace 也丢了,
+     * 他就算说了答案也接不回去,只能从头再来。问一句话不该是任务的终点,是一次暂停。
+     */
+    var onAsk: ((String) -> String?)? = null
     var onStep: ((Step) -> Unit)? = null
 
     fun run(): Outcome {
@@ -106,10 +117,15 @@ class Agent(
                 }
                 "ask" -> {
                     val q = act.optString("question", "需要你确认")
-                    pendingQuestion = q
-                    record(n, thought, name, q)
-                    onAsk?.invoke(q)
-                    return Outcome(false, "等待用户确认: $q", trace)
+                    val a = onAsk?.invoke(q)
+                    if (a.isNullOrBlank()) return Outcome(false, "等你拍板:$q", trace)
+                    answers += q to a
+                    // 走让路那条路收尾:问一句不算做了一步(预算是留给动作的),
+                    // 而且等回答期间界面当然没变 —— 不声明这一轮没动手的话,下一轮的
+                    // 「界面没有任何变化」会记到上一个真实动作头上,几次之后判它卡死。
+                    // 循环末尾的 `if (lastStepYielded) n--` 会把这一步退回去,
+                    // 这里再减一次就成了倒着数(实测:答完之后步数从「第 2 步」跳回「第 1 步」)
+                    lastStepYielded = true
                 }
                 "note" -> {
                     val v = act.optString("text")
@@ -214,6 +230,11 @@ class Agent(
             notes.forEach { appendLine("  · $it") }
             appendLine()
         }
+        if (answers.isNotEmpty()) {
+            appendLine("你问过机主、他答了的:")
+            answers.forEach { (q, a) -> appendLine("  · 你问「$q」,他答「$a」") }
+            appendLine()
+        }
         if (trace.isNotEmpty()) {
             appendLine("已经做过的:")
             trace.takeLast(8).forEach { appendLine("  ${it.n}. ${it.action} -> ${it.result}") }
@@ -274,7 +295,8 @@ class Agent(
               wait        ms
               note        text(把查到的事实记下来,后面每一轮都还看得到)
               done        summary(任务结果,说清楚查到/做成了什么)
-              ask         question(需要主人拍板的事)
+              ask         question(需要主人拍板的事。他答完你会在「他答了的」里看到原话,
+                          接着往下做 —— 问一句不结束任务,也不占步数)
 
             必须守的几条:
             - 序号只在当前这份列表里有效,每一步都会重新编号,不要用上一步的序号。

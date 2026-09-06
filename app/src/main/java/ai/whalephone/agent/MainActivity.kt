@@ -222,7 +222,7 @@ class MainActivity : Activity() {
         rendered++
         val r = Ui.dp(this, 16f)
         val v: View = when (l.kind) {
-            AgentBus.Kind.GOAL -> Ui.text(this, l.title, 14f, pal.onAccent).apply {
+            AgentBus.Kind.GOAL, AgentBus.Kind.REPLY -> Ui.text(this, l.title, 14f, pal.onAccent).apply {
                 background = Ui.bubble(pal.accent, r, mine = true)
                 setPadding(Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 10f),
                     Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 10f))
@@ -238,7 +238,7 @@ class MainActivity : Activity() {
         }
         val lp = Ui.lp(Ui.WRAP, Ui.WRAP).apply {
             topMargin = Ui.dp(this@MainActivity, 6f)
-            if (l.kind == AgentBus.Kind.GOAL) {
+            if (l.kind == AgentBus.Kind.GOAL || l.kind == AgentBus.Kind.REPLY) {
                 gravity = Gravity.END
                 marginStart = Ui.dp(this@MainActivity, 48f)
             } else {
@@ -282,6 +282,15 @@ class MainActivity : Activity() {
     // ---- 动作 ----
 
     private fun onSendOrStop() {
+        // 它在等回答的时候,这个框的意思是「回答它」,不是「下新任务」,
+        // 也不是「停止」—— 任务没结束,只是挂着
+        AgentBus.asking?.let {
+            val a = input.text.toString().trim()
+            if (a.isBlank()) { toast("写一句回答它"); return }
+            input.setText("")
+            AgentService.answer(this, a)
+            return
+        }
         if (AgentBus.running) {
             startService(Intent(this, AgentService::class.java).setAction(AgentService.ACT_STOP))
             return
@@ -301,10 +310,15 @@ class MainActivity : Activity() {
     }
 
     private fun syncSendButton() {
-        val run = AgentBus.running
-        Ui.repaintIcon(sendBtn, if (run) R.drawable.ic_stop else R.drawable.ic_send,
-            pal.onAccent, if (run) pal.bad else pal.accent, pal.ripple)
+        val q = AgentBus.asking
+        val stop = AgentBus.running && q == null
+        Ui.repaintIcon(sendBtn, if (stop) R.drawable.ic_stop else R.drawable.ic_send,
+            pal.onAccent, if (stop) pal.bad else if (q != null) pal.warn else pal.accent, pal.ripple)
+        if (voice == null) input.hint = hint()
     }
+
+    /** 输入框的提示语只有一个出处 —— 它同时被「在等回答」和「正在听」改写 */
+    private fun hint() = AgentBus.asking?.let { "回答它:$it" } ?: "说一句你要它做什么"
 
     private fun toggleOverlay(screen: Boolean) {
         if (!OverlayService.granted(this)) {
@@ -384,7 +398,7 @@ class MainActivity : Activity() {
     private fun stopVoice() {
         voice?.stop(); voice = null
         Ui.repaintIcon(micBtn, null, pal.accent, pal.surfaceAlt, pal.ripple)
-        input.hint = "说一句你要它做什么"
+        input.hint = hint()
     }
 
     override fun onRequestPermissionsResult(req: Int, p: Array<out String>, r: IntArray) {

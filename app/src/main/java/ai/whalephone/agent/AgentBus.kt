@@ -22,6 +22,7 @@ object AgentBus {
         /** agent 的一步动作 */      STEP,
         /** 过程里的说明 */          NOTE,
         /** 需要机主拍板 */          ASK,
+        /** 机主对上一个 ASK 的回答 */ REPLY,
         /** 任务做完了 */            RESULT,
         /** 没做成 */                FAIL,
     }
@@ -43,6 +44,22 @@ object AgentBus {
     /** 现在有没有任务在跑。界面拿它决定输入框是「发送」还是「停止」。 */
     @Volatile var running = false
         private set
+
+    /**
+     * agent 此刻正在等机主回答的那句话,没在等就是 null。
+     *
+     * 界面和悬浮球都要知道这件事:有问题挂着的时候,输入框的意思不是「下新任务」,
+     * 而是「回答它」。这个状态必须活在进程里而不是某个 Activity 里 —— 机主大概率
+     * 根本没开着 app,他是在通知里或者悬浮球上看到这个问题的。
+     */
+    @Volatile var asking: String? = null
+        private set
+
+    fun setAsking(q: String?) {
+        if (asking == q) return
+        asking = q
+        fire(null)
+    }
 
     fun snapshot(): List<Line> = synchronized(items) { items.toList() }
 

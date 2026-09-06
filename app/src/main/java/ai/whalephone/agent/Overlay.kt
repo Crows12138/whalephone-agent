@@ -465,6 +465,8 @@ class Ball(
 
     private var mode = Mode.REST
     private var voice: Voice? = null
+    /** agent 在等回答时球换个颜色 —— 机主多半没开着 app,这是他唯一看得见的地方 */
+    private val onBus: (AgentBus.Line?) -> Unit = { paintBubble() }
     private var pulse: ValueAnimator? = null
     /** 识别器报过音量没有。报了就用真实音量驱动麦克风的大小,没报才退回自己呼吸 */
     private var gotLevel = false
@@ -512,9 +514,10 @@ class Ball(
             // 上下本来就空着一截,再多留白它在球里就只剩一点点
             val p = Ui.dp(ctx, 8f)
             setPadding(p, p, p, p)
-            background = Ui.ovalGradient(pal.ballFrom, pal.ballTo)
             elevation = Ui.dp(ctx, 8f).toFloat()
         }
+        paintBubble()
+        AgentBus.subscribe(onBus)
         draggable(bubble, onTap = { toVoice() }, onDrop = { snap() })
 
         panel = buildPanel()
@@ -544,6 +547,12 @@ class Ball(
             }
             return super.onTouchEvent(e)
         }
+    }
+
+    private fun paintBubble() {
+        bubble.background =
+            if (AgentBus.asking != null) Ui.ovalGradient(pal.warn, pal.bad)
+            else Ui.ovalGradient(pal.ballFrom, pal.ballTo)
     }
 
     private fun buildPanel(): LinearLayout {
@@ -634,6 +643,7 @@ class Ball(
         typeBar.visibility = View.GONE
         heard("")
         sendBtn.visibility = View.GONE
+        sendBtn.text = if (AgentBus.asking != null) "回答" else "发送"
         lp.flags = voiceFlags
         lp.width = sw - Ui.dp(ctx, 20f)
         lp.height = WindowManager.LayoutParams.WRAP_CONTENT
@@ -654,7 +664,8 @@ class Ball(
         if (!Voice.micGranted(ctx)) { say("还没给录音权限 —— 打开 app,设置里给一次"); armRest(); return }
         micMode(true)
         listening(true)
-        say("在听…")
+        // 它在等回答的时候,说出来的话是答案不是新任务,得让机主看得出来
+        say(AgentBus.asking?.let { "在听你的回答 · 它问:" + it } ?: "在听…")
         voice = Voice(
             ctx,
             onPartial = { t -> heard(t) },
@@ -841,13 +852,14 @@ class Ball(
     private fun send(g0: String) {
         val g = g0.trim()
         if (g.isBlank()) { say("先说要做什么"); return }
-        if (Config.get(ctx, Config.KEY_API_KEY).isBlank()) {
+        val q = AgentBus.asking
+        if (q == null && Config.get(ctx, Config.KEY_API_KEY).isBlank()) {
             say("还没配模型密钥,先打开 app 设置一次"); return
         }
         stopVoice()
-        AgentService.start(ctx, g)
+        if (q != null) AgentService.answer(ctx, g) else AgentService.start(ctx, g)
         heard(g)
-        say("已经派下去了,进度看通知")
+        say(if (q != null) "答复给它了,它接着做" else "已经派下去了,进度看通知")
         sendBtn.visibility = View.GONE
         input.setText("")
         ui.postDelayed(restSoon, 900)
@@ -855,6 +867,7 @@ class Ball(
 
     override fun hide() {
         ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
+        AgentBus.unsubscribe(onBus)
         stopVoice()
         super.hide()
     }

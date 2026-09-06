@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteInput
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -30,10 +31,20 @@ class AgentService : Service() {
     private var feed: Thread? = null
     @Volatile private var stopping = false
 
+    /**
+     * 机主的回答从这里递给 agent 线程。容量 1 —— 同一时刻只可能有一个待答的问题。
+     *
+     * 用队列而不是共享变量:回答来自三个地方(界面、悬浮球、通知里的直接回复),
+     * 全是别的线程;而等待方要的是「阻塞到有答案或者超时」,这正是 poll 的语义。
+     */
+    private val answers = java.util.concurrent.ArrayBlockingQueue<String>(1)
+
     override fun onBind(i: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACT_STOP) { Watch.clear(this); stop(); return START_NOT_STICKY }
+
+        if (intent?.action == ACT_ANSWER) return takeAnswer(intent)
 
         val goal = intent?.getStringExtra(EXTRA_GOAL).orEmpty()
         if (goal.isBlank()) { stopSelf(); return START_NOT_STICKY }
@@ -46,6 +57,52 @@ class AgentService : Service() {
         stopping = false
         worker = thread(name = "wp-agent") { runTask(goal) }
         return START_STICKY
+    }
+
+    /**
+     * 收下机主的回答。
+     *
+     * 先 startForeground 再判断:这个 intent 是用 startForegroundService 送进来的
+     * (通知里的直接回复、悬浮球都可能在 app 不在前台时触发),不在几秒内转前台
+     * 系统会直接判死。
+     */
+    private fun takeAnswer(intent: Intent): Int {
+        startForeground(NOTI_ID, notify("手机助理", "收到你的回答"))
+        val text = (RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()
+            ?: intent.getStringExtra(EXTRA_TEXT).orEmpty()).trim()
+        if (text.isNotEmpty() && worker?.isAlive == true && answers.offer(text)) return START_STICKY
+        // 没有在等的任务了(答得太晚,或者任务已经收工)。不把它当成新任务 ——
+        // 「是」「第二个」这种回答单独拿出来当目标是没有意义的,反而会真的去做点什么。
+        if (text.isNotEmpty()) note("这个问题已经过期了,没人在等这句回答")
+        stopForeground(STOP_FOREGROUND_DETACH)
+        stopSelf()
+        return START_NOT_STICKY
+    }
+
+    /**
+     * 问一句,然后**停在这里等他回答**。
+     *
+     * 这是「ask 不再是任务的终点」那一改的落点:线程挂着,trace、notes、副屏、
+     * 已经打开的界面全都原样留着,答案一到就接着往下做。等待期间什么都不做,
+     * 不碰机主也不占他的屏。
+     *
+     * 但不能无限等 —— 一个永远挂着的前台服务比没有答案更糟(副屏留着、无障碍开着,
+     * 机主那边微信还付不了款)。等不到就收工,并且把「等的是什么」写进结束语。
+     */
+    private fun waitForAnswer(q: String): String? {
+        answers.clear()
+        ask(q)
+        AgentBus.setAsking(q)
+        update("等你拍板", q)
+        val a = runCatching {
+            answers.poll(ASK_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }.getOrNull()
+        AgentBus.setAsking(null)
+        nm().cancel(NOTI_ASK)
+        if (a == null || stopping) return null
+        AgentBus.post(AgentBus.Kind.REPLY, a)
+        update("接着做", a)
+        return a
     }
 
     private fun runTask(goal: String) {
@@ -129,7 +186,7 @@ class AgentService : Service() {
                 AgentBus.post(AgentBus.Kind.STEP, "第 ${s.n} 步 · ${s.action}", s.result)
             }
         }
-        agent.onAsk = { q -> ask(q) }
+        agent.onAsk = { q -> waitForAnswer(q) }
 
         val out = runCatching { agent.run() }.getOrElse {
             Log.e(TAG, "循环挂了", it)
@@ -291,9 +348,21 @@ class AgentService : Service() {
         )
     }
 
+    /**
+     * 把问题递到机主面前。三条路同时开:通知、界面里的对话流、悬浮球。
+     *
+     * 通知这一条带 RemoteInput —— 他可以直接在通知里把答案打进去,不用打开任何界面。
+     * 这和这个 app 的立场是一致的:需要他拍板不等于有权把他从正在做的事里拽出来。
+     */
     private fun ask(q: String) {
         AgentBus.post(AgentBus.Kind.ASK, q)
         channel()
+        val reply = RemoteInput.Builder(KEY_REPLY).setLabel("直接回它").build()
+        val pi = PendingIntent.getService(
+            this, 2, Intent(this, AgentService::class.java).setAction(ACT_ANSWER),
+            // 必须 MUTABLE:系统要把机主打的字塞进这个 intent 再发出来
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         nm().notify(
             NOTI_ASK,
             Notification.Builder(this, CH_ASK)
@@ -302,6 +371,11 @@ class AgentService : Service() {
                 .setStyle(Notification.BigTextStyle().bigText(q))
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setAutoCancel(true)
+                .addAction(
+                    Notification.Action.Builder(
+                        null as android.graphics.drawable.Icon?, "回答", pi
+                    ).addRemoteInput(reply).build()
+                )
                 .build()
         )
     }
@@ -316,6 +390,12 @@ class AgentService : Service() {
          *  多等一会儿换「一次都不打断」是划算的。 */
         const val DISPLAY_WAIT_MS = 180_000L
         const val ACT_STOP = "ai.whalephone.agent.STOP"
+        const val ACT_ANSWER = "ai.whalephone.agent.ANSWER"
+        const val EXTRA_TEXT = "text"
+        /** 通知里直接回复用的 key */
+        const val KEY_REPLY = "reply"
+        /** 问完最多等机主多久。等不到就收工,不留一个永远挂着的前台服务 */
+        const val ASK_WAIT_MS = 15 * 60_000L
         /** 清单里静态注册的入口用的动作,见 CommandReceiver */
         const val ACT_RUN_EXTERNAL = "ai.whalephone.agent.RUN"
         const val EXTRA_GOAL = "goal"
@@ -331,6 +411,15 @@ class AgentService : Service() {
 
         fun start(ctx: Context, goal: String) {
             ctx.startForegroundService(Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))
+        }
+
+        /** 回答 agent 刚问的那句话。界面、悬浮球、通知里的直接回复都走这里 */
+        fun answer(ctx: Context, text: String) {
+            ctx.startForegroundService(
+                Intent(ctx, AgentService::class.java)
+                    .setAction(ACT_ANSWER)
+                    .putExtra(EXTRA_TEXT, text)
+            )
         }
 
         /** 长时任务的一轮,由 Watch 的闹钟触发 */
