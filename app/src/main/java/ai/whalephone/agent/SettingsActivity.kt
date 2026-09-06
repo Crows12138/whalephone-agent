@@ -47,6 +47,17 @@ class SettingsActivity : Activity() {
             note("按过键单列一档,是因为那时你手里可能攥着一串没上屏的拼音,而「正在组词」这个状态从系统外面读不到。调大它等于给选词留更多时间,代价是你打完字放下手机时它多等同样久。"),
         ))
 
+        section(col, "做完一件事之后")
+        col.addView(card(
+            *labeled("醒着等多久再收工(毫秒,0=做完就收)",
+                field(AgentService.KEY_IDLE_KEEP, "300000",
+                    AgentService.IDLE_KEEP_MS.toString(), number = true)),
+            note("追加任务是常态。醒着的这几分钟里再说一句,省掉重连特权桥、重开无障碍、" +
+                "以及可能的重造副屏 —— 造副屏是唯一一个必然会打断你的动作。它还记得刚做过什么," +
+                "所以「那第二个多少钱」这种话接得上。无障碍在这期间仍然是关的(不然微信付不了款)," +
+                "想连它也留着就把下面的自动开关关掉。"),
+        ))
+
         section(col, "悬浮窗")
         val permLine = note("")
         col.addView(card(

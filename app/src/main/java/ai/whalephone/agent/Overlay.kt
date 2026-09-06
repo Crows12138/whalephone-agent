@@ -376,7 +376,6 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
                 setOnClickListener { OverlayService.setScreen(ctx, false) }
             }, Ui.lp(Ui.dp(ctx, 30f), Ui.dp(ctx, 30f)))
         }
-        draggable(bar)
 
         canvasView = Frame(ctx)
         hint = Ui.text(ctx, "副屏还没建起来 —— 下个任务开始时会出现", 11f, pal.textSub).apply {
@@ -386,7 +385,27 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
         box.addView(bar, Ui.lp(Ui.MATCH, Ui.WRAP))
         box.addView(hint, Ui.lp(Ui.MATCH, Ui.WRAP))
         box.addView(canvasView, Ui.lp(Ui.MATCH, 0, 1f))
+
+        // 整个窗口都能拖,不只是顶上那一条 —— 这块窗口大半个身子是画面,
+        // 机主的手第一下本来就落在画面上。事件之所以能落到这里:画面那个 View
+        // 和标题栏都不处理触摸,只有 ✕ 自己吃掉,所以关掉那一下不会变成拖动。
+        draggable(box, onDrop = { clamp() })
         return box
+    }
+
+    /**
+     * 松手后把窗口拉回屏内。
+     *
+     * 整块都能拖之后更容易一把甩出去,而这个窗口带 FLAG_LAYOUT_NO_LIMITS ——
+     * 甩出屏幕就再也点不着了,只能去设置里把取景窗关了再开。至少留一条边在屏内。
+     */
+    private fun clamp() {
+        val (sw, sh) = screenSize()
+        val w = if (lp.width > 0) lp.width else Ui.dp(ctx, 120f)
+        val keep = Ui.dp(ctx, 48f)
+        lp.x = min(max(lp.x, keep - w), sw - keep)
+        lp.y = min(max(lp.y, 0), sh - keep)
+        apply()
     }
 
     override fun show() {

@@ -19,6 +19,14 @@ class Agent(
     private val llm: Llm,
     private val goal: String,
     private val maxSteps: Int = 40,
+    /**
+     * 刚给机主做过的几件事(目标 -> 结果)。
+     *
+     * 追加任务是常态:「那第二个多少钱」「换成美团再看一遍」。副屏上的界面还停在
+     * 上一个任务结束的地方,模型却对那件事一无所知 —— 不给它这份上下文,
+     * 它看到一屏商品详情会先猜自己在哪,或者干脆 home 掉重来。
+     */
+    private val history: List<Pair<String, String>> = emptyList(),
 ) {
     data class Step(val n: Int, val thought: String, val action: String, val result: String)
     data class Outcome(val done: Boolean, val message: String, val trace: List<Step>)
@@ -225,6 +233,11 @@ class Agent(
     private fun userTurn(n: Int, render: String): String = buildString {
         appendLine("目标:$goal")
         appendLine()
+        if (history.isNotEmpty()) {
+            appendLine("你刚给他做过的(副屏上的界面很可能还停在最后那一步):")
+            history.forEach { (g, r) -> appendLine("  · 「$g」 -> $r") }
+            appendLine()
+        }
         if (notes.isNotEmpty()) {
             appendLine("已经查到的:")
             notes.forEach { appendLine("  · $it") }

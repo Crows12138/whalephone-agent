@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlin.concurrent.thread
 
@@ -39,6 +41,20 @@ class AgentService : Service() {
      */
     private val answers = java.util.concurrent.ArrayBlockingQueue<String>(1)
 
+    /**
+     * 做完一件事之后的保温期。
+     *
+     * 原来每个任务结束就把摊子收了(stopSelf),下一句话要重来一遍:重连特权桥、
+     * 重开无障碍、进程要是被回收还得重造副屏 —— 而重造副屏是全流程里唯一
+     * 必然打断机主的动作。可追加任务本来就是常态:「那第二个多少钱」「顺便看看评分」。
+     *
+     * 所以做完不收摊,先醒着等一会儿。这段时间里再来任务是零开销的,而且它还记得
+     * 刚才做了什么。到点没人追,才真收工。
+     */
+    private val idle = Handler(Looper.getMainLooper())
+    private val settle = Runnable { settleNow() }
+    private var thisGoal = ""
+
     override fun onBind(i: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -55,6 +71,8 @@ class AgentService : Service() {
         AgentBus.post(AgentBus.Kind.GOAL, goal)
         AgentBus.setRunning(true)
         stopping = false
+        idle.removeCallbacks(settle)   // 保温期里追进来的任务:摊子还在,直接开工
+        thisGoal = goal
         worker = thread(name = "wp-agent") { runTask(goal) }
         return START_STICKY
     }
@@ -179,7 +197,7 @@ class AgentService : Service() {
         startFeedIfAsked()
 
         val hands = Hands(probe, displayId, this)
-        val agent = Agent(hands, llm, goal)
+        val agent = Agent(hands, llm, goal, history = recent.toList())
         agent.onStep = { s ->
             if (!stopping) {
                 update("第 ${s.n} 步 · ${s.action}", s.result.take(80))
@@ -249,12 +267,39 @@ class AgentService : Service() {
      */
     private fun stop() {
         stopping = true
+        idle.removeCallbacks(settle)
+        recent.clear()
         AgentBus.setRunning(false)
         worker?.interrupt()
         // 机主明确点了停止,长时任务也已经被 Watch.clear 清掉,权限没有留着的理由
         runCatching { A11yGate.close(this) }
         shared?.release(); shared = null
         stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    /**
+     * 醒着等下一句。
+     *
+     * 无障碍在这里仍然是关掉的(见 finish),因为它开着的时候机主的微信付不了款 ——
+     * 那是他手机上看得见的副作用,不能为了省一秒钟的重开而挂着几分钟。留下的是
+     * 服务本身、特权桥的连接和那块副屏,追加任务时省掉的正是这几样里最贵的。
+     * 想连无障碍也一起留着的,在设置里关掉「自动开关无障碍」就是。
+     */
+    private fun keepWarm(msg: String) {
+        val ms = Config.get(this, KEY_IDLE_KEEP, IDLE_KEEP_MS.toString()).toLongOrNull()
+            ?: IDLE_KEEP_MS
+        if (ms <= 0L) { settleNow(); return }
+        update("做完了,还醒着", "$msg\n\n随时可以再说一句;${ms / 60000} 分钟没有新任务就自己收工")
+        idle.removeCallbacks(settle)
+        idle.postDelayed(settle, ms)
+    }
+
+    /** 真收工。副屏仍然留着(只有机主点停止才销毁),但服务不再占着前台 */
+    private fun settleNow() {
+        idle.removeCallbacks(settle)
+        Log.i(TAG, "保温到点,收摊")
+        stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
 
@@ -273,11 +318,15 @@ class AgentService : Service() {
         runCatching { A11yGate.close(this) }
         // 一次性任务结束也留着副屏:用户很可能接着下一个任务,重造一次就多抖一次。
         // 真正销毁只发生在用户点「停止」,或者服务被系统回收。
-        update("任务结束", msg, ongoing = false)
         AgentBus.post(if (ok) AgentBus.Kind.RESULT else AgentBus.Kind.FAIL, msg)
         AgentBus.setRunning(false)
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
+        // 留给下一句话当上下文。只留最近两件:再往前的,副屏上早就不是那个界面了,
+        // 给多了反而把模型往旧界面上带
+        if (thisGoal.isNotBlank()) {
+            recent += thisGoal to msg
+            while (recent.size > 2) recent.removeAt(0)
+        }
+        keepWarm(msg)
     }
 
     /**
@@ -396,6 +445,9 @@ class AgentService : Service() {
         const val KEY_REPLY = "reply"
         /** 问完最多等机主多久。等不到就收工,不留一个永远挂着的前台服务 */
         const val ASK_WAIT_MS = 15 * 60_000L
+        /** 做完之后醒着等多久。这段时间里追加任务是零开销的 */
+        const val IDLE_KEEP_MS = 5 * 60_000L
+        const val KEY_IDLE_KEEP = "IDLE_KEEP_MS"
         /** 清单里静态注册的入口用的动作,见 CommandReceiver */
         const val ACT_RUN_EXTERNAL = "ai.whalephone.agent.RUN"
         const val EXTRA_GOAL = "goal"
@@ -404,6 +456,9 @@ class AgentService : Service() {
 
         /** 副屏跨任务复用,所以挂在伴生对象上而不是实例上 */
         @Volatile private var shared: AgentDisplay? = null
+
+        /** 刚做过的几件事。和副屏一样跨任务活着,机主追问时模型才接得上 */
+        private val recent = mutableListOf<Pair<String, String>>()
 
         /** 取景窗要按帧读这块屏。只读,不许外面动它的生命周期。 */
         val liveDisplay: AgentDisplay? get() = shared
