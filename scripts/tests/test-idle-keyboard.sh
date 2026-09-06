@@ -14,7 +14,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 A=ai.whalephone.agent
-IDLE_MS="${IDLE_MS:-20000}"
+IDLE_MS="${IDLE_MS:-10000}"
 PASS=0; FAIL=0
 # 判据自己算出来的「输入框多久没动」。这个量只由两个绝对时间戳决定,
 # 不受线程调度影响 —— 墙上时钟在这台机器上不可用(见下面 A 用例的注释)。

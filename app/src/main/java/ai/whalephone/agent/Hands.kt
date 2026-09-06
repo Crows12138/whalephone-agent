@@ -457,7 +457,7 @@ object Conflict {
      * 算,让路会彻底失效,而日志一片正常、指标一片漂亮。这个项目已经在静默失效上
      * 栽过两次(数「字有没有丢」、TYPING 探针自己重算判据),宁可退回只看状态的旧行为。
      *
-     * 阈值是个取舍,如实说清:20 秒里输入框一动不动,更像是人走开了而不是在措辞。
+     * 阈值是个取舍,如实说清:10 秒里输入框一动不动,更像是人走开了而不是在措辞。
      * 判错的代价是键盘被收起一次(草稿还在,点回输入框能接着打);不判的代价是
      * agent 在这种状态下完全不工作。可以用 TYPING_IDLE_MS 调。
      */
@@ -555,7 +555,7 @@ object Conflict {
     private fun signalArmed() = fpReadable || imeArmed
 
     private fun idleMs(svc: AccessibilityService): Long =
-        Config.get(svc, "TYPING_IDLE_MS", "20000").toLongOrNull() ?: 20_000L
+        Config.get(svc, "TYPING_IDLE_MS", "10000").toLongOrNull() ?: 10_000L
 
     /** 只打一次「按停手算」的日志,免得 500 毫秒一轮刷屏 */
     @Volatile private var idleLogged = false

@@ -61,7 +61,7 @@ task 归属、副屏销毁。最难的是焦点,结论实测出来的:副屏上�
 | `LLM_MODEL` | 模型名 | `deepseek-chat` |
 | `DEMO_FEED` | 设为 `1` 则任务期间把副屏画面写成 PNG,供录像取景窗使用 | 关 |
 | `A11Y_AUTO` | 设为 `0` 则不自动开关无障碍权限,由机主自己管 | 开 |
-| `TYPING_IDLE_MS` | 键盘还开着、但多久没有键落下就算机主已经停手 | `20000` |
+| `TYPING_IDLE_MS` | 键盘还开着、但多久没有键落下就算机主已经停手 | `10000` |
 
 DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_url 和 model 即可。
 
