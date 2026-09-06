@@ -1,14 +1,15 @@
 package ai.whalephone.agent
 
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.Button
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -17,215 +18,453 @@ import android.widget.Toast
 import kotlin.concurrent.thread
 
 /**
- * 配置和启停。这个界面只在主屏上,由用户主动打开 ——
- * agent 跑起来之后不再有任何 UI 出现在主屏,进度只走通知。
+ * 机主这一侧的界面。
+ *
+ * 它只在主屏上、只在机主自己打开的时候出现;agent 跑起来之后不会有任何窗口自己冒出来。
+ * 界面做成对话流,是因为这个 app 的交互确实就是对话式的:机主说一句话,agent 分成
+ * 若干步去做,每一步都该看得见。原来这些只在 logcat 和一条通知里,机主看不到过程,
+ * 只能看到结果 —— 而「它到底有没有在动」是这个产品最需要回答的问题。
+ *
+ * 过程数据来自 AgentBus(进程内),不是广播:界面关掉再打开要能看到之前发生过什么。
  */
 class MainActivity : Activity() {
 
-    private lateinit var status: TextView
-    private lateinit var scroller: ScrollView
-    private lateinit var goal: EditText
-    private lateinit var shizukuBtn: Button
-    private lateinit var manualA11y: TextView
+    private val pal by lazy { Palette.of(this) }
+    private lateinit var feedBox: LinearLayout
+    private lateinit var feedScroll: ScrollView
+    private lateinit var pill: TextView
+    private lateinit var detail: TextView
+    private lateinit var detailBox: LinearLayout
+    private lateinit var input: EditText
+    private lateinit var sendBtn: TextView
+    private lateinit var micBtn: TextView
+    private lateinit var screenChip: TextView
+    private lateinit var ballChip: TextView
+    private lateinit var watchChip: TextView
+    private var voice: Voice? = null
+    private var rendered = 0
+
+    private val onBus: (AgentBus.Line?) -> Unit = { line ->
+        if (line == null) redraw() else { addLine(line); toBottom() }
+        syncSendButton()
+    }
+    private val onOverlay: () -> Unit = { syncChips() }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        val pad = (16 * resources.displayMetrics.density).toInt()
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-            // 不这么写的话,输入框会在创建时自动拿走焦点,ScrollView 跟着滚下去,
-            // 顶上的状态面板被顶出可视区 —— 而那正是第一眼要看的东西。
-            isFocusableInTouchMode = true
-        }
-
-        fun label(t: String) = TextView(this).apply {
-            text = t; setPadding(0, pad / 2, 0, pad / 6); setTextColor(Color.GRAY); textSize = 12f
-        }
-
-        fun field(key: String, hint: String, def: String = "", password: Boolean = false) =
-            EditText(this).apply {
-                setText(Config.get(this@MainActivity, key, def))
-                this.hint = hint
-                setSingleLine()
-                if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                setOnFocusChangeListener { _, has ->
-                    if (!has) Config.set(this@MainActivity, key, text.toString().trim())
-                }
-            }
-
-        root.addView(Button(this).apply {
-            text = "刷新状态"
-            setOnClickListener { refresh() }
-        })
-        shizukuBtn = Button(this).apply {
-            text = "授权 Shizuku"
-            setOnClickListener { onShizuku() }
-        }
-        root.addView(shizukuBtn)
-        // 没有「打开无障碍设置」按钮。
-        //
-        // 它能到的只是无障碍首页,而本 app 的服务在二级页里(One UI 是
-        // 设置 → 辅助功能 → 已安装的应用程序),机主点进去找不到,反而更迷惑。
-        // 想直接跳到那一项要用 ACTION_ACCESSIBILITY_DETAILS_SETTINGS —— 实测这台
-        // 机器上它需要 OPEN_ACCESSIBILITY_DETAILS_SETTINGS,protectionLevel 是
-        // signature|installer,普通 app 拿不到;二级页本身在这台 ROM 上也没有独立
-        // Activity(是首页里的一个 fragment),深链只能靠 ROM 私有参数,换台机器就断。
-        //
-        // 而且正常情况下机主根本不需要碰它:A11yGate 开工时自己开、收工自己关。
-        // 所以只在**真的自动开不了**的时候,把路径作为一行提示显示出来。
-        manualA11y = label("手动开:设置 → 辅助功能 → 已安装的应用程序 → WhalePhone Agent")
-        root.addView(manualA11y)
-
-        root.addView(label("LLM 接口(OpenAI 兼容)"))
-        val base = field(Config.KEY_BASE_URL, "https://api.deepseek.com/v1", "https://api.deepseek.com/v1")
-        val key = field(Config.KEY_API_KEY, "sk-...", password = true)
-        val model = field(Config.KEY_MODEL, "deepseek-chat", "deepseek-chat")
-        root.addView(base); root.addView(key); root.addView(model)
-
-        root.addView(label("任务"))
-        goal = EditText(this).apply {
-            hint = "用一句话说你要它做什么"
-            setText("打开淘宝,搜索「AirPods Pro 2」,看看第一个商品多少钱,告诉我价格")
-            minLines = 2
-        }
-        root.addView(goal)
-
-        root.addView(label("长时任务(留空 = 只跑一次;每次亮屏检查一轮)"))
-        val rounds = EditText(this).apply { hint = "盯几轮"; setSingleLine()
-            inputType = InputType.TYPE_CLASS_NUMBER }
-        val every = EditText(this).apply { hint = "两轮至少隔几分钟(最少 ${Watch.MIN_GAP_MIN})"
-            setSingleLine(); inputType = InputType.TYPE_CLASS_NUMBER }
-        root.addView(rounds); root.addView(every)
-
-        root.addView(Button(this).apply {
-            text = "在副屏上开始"
-            setOnClickListener {
-                listOf(base to Config.KEY_BASE_URL, key to Config.KEY_API_KEY, model to Config.KEY_MODEL)
-                    .forEach { (v, k) -> Config.set(this@MainActivity, k, v.text.toString().trim()) }
-                val g = goal.text.toString().trim()
-                if (g.isBlank()) { toast("先写任务"); return@setOnClickListener }
-                val n = rounds.text.toString().toIntOrNull() ?: 0
-                if (n > 1) {
-                    val iv = (every.text.toString().toIntOrNull() ?: Watch.MIN_GAP_MIN)
-                    Watch.start(this@MainActivity, g, n, iv)
-                    toast("开始盯:$n 轮,亮屏时检查,间隔  ${maxOf(iv, Watch.MIN_GAP_MIN)} 分钟起")
-                } else {
-                    Watch.clear(this@MainActivity)
-                    toast("已启动,进度看通知")
-                }
-                AgentService.start(this@MainActivity, g)
-            }
-        })
-        root.addView(Button(this).apply {
-            text = "停止"
-            setOnClickListener {
-                startService(Intent(this@MainActivity, AgentService::class.java).setAction(AgentService.ACT_STOP))
-            }
-        })
-
-        // 状态面板钉在滚动区外面。它是这个界面最该被第一眼看到的东西
-        // (四项里少任何一项 agent 都跑不起来),放进 ScrollView 里就会被
-        // 下面的输入框挤走 —— 试过让它滚回顶部,不如从结构上不让它滚。
-        status = TextView(this).apply {
-            textSize = 14f
-            setTextIsSelectable(true)
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(pad, pad, pad, pad / 2)
-        }
-
-        scroller = ScrollView(this).apply {
-            addView(root, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(status, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0).apply { weight = 1f })
-        }
-        setContentView(container)
-        applyInsets(container)
-        root.requestFocus()
-        refresh()
+        window.statusBarColor = pal.bg
+        window.navigationBarColor = pal.bg
+        setContentView(buildRoot())
+        redraw()
+        refreshStatus()
     }
 
-    /**
-     * targetSdk 35 起系统强制 edge-to-edge,内容直接画到状态栏和标题栏底下,
-     * 不再自动留白。表现是界面顶部几行被盖住 —— 这里正好盖住的是状态面板,
-     * 而那是唯一告诉用户「还差哪一步」的地方。
-     *
-     * 用平台自带的 insets API 自己补,不为这一处引 androidx。
-     */
-    private fun applyInsets(v: android.view.View) {
-        val bar = android.util.TypedValue().let { tv ->
-            if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true))
-                android.util.TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics)
-            else 0
+    // ---- 布局 ----
+
+    private fun buildRoot(): View {
+        val root = Ui.col(this).apply { setBackgroundColor(pal.bg) }
+        root.addView(buildHeader(), Ui.lp(Ui.MATCH, Ui.WRAP))
+        root.addView(buildDetail(), Ui.lp(Ui.MATCH, Ui.WRAP))
+
+        feedBox = Ui.col(this).apply {
+            setPadding(Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 8f),
+                Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 8f))
         }
-        v.setOnApplyWindowInsetsListener { view, insets ->
-            val sys = insets.getInsets(
-                android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime()
-            )
-            view.setPadding(sys.left, sys.top + bar, sys.right, sys.bottom)
-            insets
+        feedScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(feedBox, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP))
         }
-        v.requestApplyInsets()
+        root.addView(feedScroll, Ui.lp(Ui.MATCH, 0, 1f))
+        root.addView(buildChips(), Ui.lp(Ui.MATCH, Ui.WRAP))
+        root.addView(buildInputBar(), Ui.lp(Ui.MATCH, Ui.WRAP))
+        Ui.insets(root)
+        return root
+    }
+
+    private fun buildHeader(): View {
+        val pad = Ui.dp(this, 14f)
+        pill = Ui.text(this, "检查中", 11f, pal.textSub).apply {
+            setPadding(Ui.dp(this@MainActivity, 10f), Ui.dp(this@MainActivity, 4f),
+                Ui.dp(this@MainActivity, 10f), Ui.dp(this@MainActivity, 4f))
+            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 12f)), pal.ripple)
+            setOnClickListener { detailBox.visibility = if (detailBox.isShown) View.GONE else View.VISIBLE }
+        }
+        val gear = Ui.text(this, "⚙", 18f, pal.textSub).apply {
+            setPadding(Ui.dp(this@MainActivity, 10f), 0, 0, 0)
+            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+        return Ui.row(this).apply {
+            setPadding(pad, Ui.dp(this@MainActivity, 10f), pad, Ui.dp(this@MainActivity, 10f))
+            setBackgroundColor(pal.bg)
+            addView(Ui.text(this@MainActivity, "手机助理", 19f, pal.textMain, bold = true))
+            addView(View(this@MainActivity), Ui.lp(0, 1, 1f))
+            addView(pill)
+            addView(gear)
+        }
+    }
+
+    /** 状态明细默认收起 —— 一切正常时它是噪音,出问题时点一下药丸就能展开。 */
+    private fun buildDetail(): View {
+        val pad = Ui.dp(this, 14f)
+        detail = Ui.text(this, "", 12f, pal.textSub).apply {
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        val shizuku = chip("打开 Shizuku") { onShizuku() }
+        detailBox = Ui.col(this).apply {
+            visibility = View.GONE
+            setPadding(pad, 0, pad, Ui.dp(this@MainActivity, 10f))
+            addView(Ui.col(this@MainActivity).apply {
+                background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 12f), pal.line, Ui.dp(this@MainActivity, 1f))
+                setPadding(pad, pad, pad, pad)
+                addView(detail, Ui.lp(Ui.MATCH, Ui.WRAP))
+                addView(Ui.row(this@MainActivity).apply {
+                    setPadding(0, Ui.dp(this@MainActivity, 10f), 0, 0)
+                    addView(shizuku)
+                }, Ui.lp(Ui.MATCH, Ui.WRAP))
+            }, Ui.lp(Ui.MATCH, Ui.WRAP))
+        }
+        return detailBox
+    }
+
+    private fun buildChips(): View {
+        screenChip = chip("看副屏") { toggleOverlay(screen = true) }
+        ballChip = chip("悬浮球") { toggleOverlay(screen = false) }
+        watchChip = chip("盯着") { watchDialog() }
+        return Ui.row(this).apply {
+            setPadding(Ui.dp(this@MainActivity, 14f), 0, Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 6f))
+            addView(screenChip); addView(space()); addView(ballChip); addView(space()); addView(watchChip)
+        }
+    }
+
+    private fun buildInputBar(): View {
+        val pad = Ui.dp(this, 10f)
+        micBtn = Ui.text(this, "🎤", 17f, pal.accent).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 19f)), pal.ripple)
+            setOnClickListener { toggleVoice() }
+        }
+        input = EditText(this).apply {
+            hint = "说一句你要它做什么"
+            setHintTextColor(pal.textSub)
+            setTextColor(pal.textMain)
+            textSize = 15f
+            background = null
+            maxLines = 4
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setOnEditorActionListener { _, id, _ ->
+                if (id == EditorInfo.IME_ACTION_SEND) { onSendOrStop(); true } else false
+            }
+        }
+        sendBtn = Ui.text(this, "➤", 16f, pal.onAccent).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(pal.accent, Ui.dp(this@MainActivity, 19f)), pal.ripple)
+            setOnClickListener { onSendOrStop() }
+        }
+        val bar = Ui.row(this).apply {
+            setPadding(pad, Ui.dp(this@MainActivity, 6f), pad, Ui.dp(this@MainActivity, 6f))
+            background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 24f), pal.line, Ui.dp(this@MainActivity, 1f))
+            addView(micBtn, Ui.lp(Ui.dp(this@MainActivity, 38f), Ui.dp(this@MainActivity, 38f)))
+            addView(input, Ui.lp(0, Ui.WRAP, 1f).apply {
+                marginStart = Ui.dp(this@MainActivity, 8f); marginEnd = Ui.dp(this@MainActivity, 8f)
+            })
+            addView(sendBtn, Ui.lp(Ui.dp(this@MainActivity, 38f), Ui.dp(this@MainActivity, 38f)))
+        }
+        return Ui.col(this).apply {
+            setPadding(Ui.dp(this@MainActivity, 12f), 0, Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 10f))
+            addView(bar, Ui.lp(Ui.MATCH, Ui.WRAP))
+        }
+    }
+
+    private fun chip(t: String, onClick: () -> Unit) = Ui.text(this, t, 12f, pal.textSub).apply {
+        setPadding(Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 6f),
+            Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 6f))
+        background = Ui.tappable(
+            Ui.round(pal.surface, Ui.dp(this@MainActivity, 14f), pal.line, Ui.dp(this@MainActivity, 1f)), pal.ripple)
+        setOnClickListener { onClick() }
+    }
+
+    private fun space() = View(this).also { it.layoutParams = Ui.lp(Ui.dp(this, 8f), 1) }
+
+    // ---- 对话流 ----
+
+    private fun redraw() {
+        feedBox.removeAllViews()
+        rendered = 0
+        val all = AgentBus.snapshot()
+        if (all.isEmpty()) feedBox.addView(welcome(), Ui.lp(Ui.MATCH, Ui.WRAP))
+        all.forEach { addLine(it) }
+        toBottom()
+    }
+
+    private fun welcome(): View {
+        val box = Ui.col(this).apply {
+            background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 16f), pal.line, Ui.dp(this@MainActivity, 1f))
+            setPadding(Ui.dp(this@MainActivity, 16f), Ui.dp(this@MainActivity, 16f),
+                Ui.dp(this@MainActivity, 16f), Ui.dp(this@MainActivity, 16f))
+        }
+        box.addView(Ui.text(this, "它在另一块屏上替你干活", 15f, pal.textMain, bold = true))
+        box.addView(Ui.text(this,
+            "任务跑在一块你看不见的副屏上,你这块屏该刷什么刷什么 —— 焦点、键盘、剪贴板都不会被动。\n想看它在做什么,点上面的「看副屏」。",
+            13f, pal.textSub).apply { setPadding(0, Ui.dp(this@MainActivity, 8f), 0, Ui.dp(this@MainActivity, 12f)) })
+        listOf(
+            "打开淘宝,搜索「AirPods Pro 2」,第一个商品多少钱",
+            "打开美团,看看附近评分最高的川菜馆",
+            "打开日历,看看我明天有什么安排",
+        ).forEach { ex ->
+            box.addView(Ui.text(this, ex, 13f, pal.accent).apply {
+                setPadding(Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 9f),
+                    Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 9f))
+                background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(this@MainActivity, 12f)), pal.ripple)
+                setOnClickListener { input.setText(ex); input.setSelection(ex.length) }
+            }, Ui.lp(Ui.MATCH, Ui.WRAP).apply { topMargin = Ui.dp(this@MainActivity, 6f) })
+        }
+        return box
+    }
+
+    private fun addLine(l: AgentBus.Line) {
+        if (rendered == 0) feedBox.removeAllViews()
+        rendered++
+        val r = Ui.dp(this, 16f)
+        val v: View = when (l.kind) {
+            AgentBus.Kind.GOAL -> Ui.text(this, l.title, 14f, pal.onAccent).apply {
+                background = Ui.bubble(pal.accent, r, mine = true)
+                setPadding(Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 10f),
+                    Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 10f))
+            }
+            AgentBus.Kind.STEP -> stepView(l)
+            AgentBus.Kind.NOTE -> Ui.text(this, l.title, 12f, pal.textSub).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, Ui.dp(this@MainActivity, 4f), 0, Ui.dp(this@MainActivity, 4f))
+            }
+            AgentBus.Kind.ASK -> card(l.title, "需要你拍板", pal.warn)
+            AgentBus.Kind.RESULT -> card(l.title, "完成", pal.ok)
+            AgentBus.Kind.FAIL -> card(l.title, "没做成", pal.bad)
+        }
+        val lp = Ui.lp(Ui.WRAP, Ui.WRAP).apply {
+            topMargin = Ui.dp(this@MainActivity, 6f)
+            if (l.kind == AgentBus.Kind.GOAL) {
+                gravity = Gravity.END
+                marginStart = Ui.dp(this@MainActivity, 48f)
+            } else {
+                width = Ui.MATCH
+            }
+        }
+        feedBox.addView(v, lp)
+    }
+
+    /** 步骤行做得比气泡轻:一轮任务有十几步,每一步都做成卡片会把结果淹掉 */
+    private fun stepView(l: AgentBus.Line): View {
+        val box = Ui.col(this).apply {
+            background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 12f))
+            setPadding(Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 8f),
+                Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 8f))
+        }
+        box.addView(Ui.text(this, l.title, 12f, pal.accent, bold = true))
+        if (l.body.isNotBlank())
+            box.addView(Ui.text(this, l.body, 13f, pal.textMain).apply {
+                setPadding(0, Ui.dp(this@MainActivity, 2f), 0, 0)
+            })
+        return box
+    }
+
+    private fun card(body: String, tag: String, color: Int): View {
+        val box = Ui.col(this).apply {
+            background = Ui.round(pal.surface, Ui.dp(this@MainActivity, 14f), color, Ui.dp(this@MainActivity, 1f))
+            setPadding(Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 10f),
+                Ui.dp(this@MainActivity, 14f), Ui.dp(this@MainActivity, 12f))
+        }
+        box.addView(Ui.text(this, tag, 11f, color, bold = true))
+        box.addView(Ui.text(this, body, 14f, pal.textMain).apply {
+            setTextIsSelectable(true)
+            setPadding(0, Ui.dp(this@MainActivity, 4f), 0, 0)
+        })
+        return box
+    }
+
+    private fun toBottom() = feedScroll.post { feedScroll.fullScroll(View.FOCUS_DOWN) }
+
+    // ---- 动作 ----
+
+    private fun onSendOrStop() {
+        if (AgentBus.running) {
+            startService(Intent(this, AgentService::class.java).setAction(AgentService.ACT_STOP))
+            return
+        }
+        val g = input.text.toString().trim()
+        if (g.isBlank()) { toast("先写任务"); return }
+        if (Config.get(this, Config.KEY_API_KEY).isBlank()) {
+            toast("还没配 LLM 密钥"); startActivity(Intent(this, SettingsActivity::class.java)); return
+        }
+        val n = Config.get(this, KEY_ROUNDS).toIntOrNull() ?: 0
+        if (n > 1) {
+            val iv = Config.get(this, KEY_EVERY).toIntOrNull() ?: Watch.MIN_GAP_MIN
+            Watch.start(this, g, n, iv)
+        } else Watch.clear(this)
+        input.setText("")
+        AgentService.start(this, g)
+    }
+
+    private fun syncSendButton() {
+        val run = AgentBus.running
+        sendBtn.text = if (run) "■" else "➤"
+        sendBtn.background = Ui.tappable(
+            Ui.round(if (run) pal.bad else pal.accent, Ui.dp(this, 19f)), pal.ripple)
+    }
+
+    private fun toggleOverlay(screen: Boolean) {
+        if (!OverlayService.granted(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("要悬浮窗权限")
+                .setMessage("副屏取景窗和悬浮球都要「显示在其他应用上层」这个权限。\n只有你能在系统设置里给它,app 自己拿不到。")
+                .setPositiveButton("去给") { _, _ -> OverlayService.requestPermission(this) }
+                .setNegativeButton("算了", null)
+                .show()
+            return
+        }
+        if (screen) OverlayService.setScreen(this, !OverlayService.screenOn)
+        else OverlayService.setBall(this, !OverlayService.ballOn)
+    }
+
+    private fun syncChips() {
+        fun paint(v: TextView, on: Boolean, label: String) {
+            v.text = if (on) "$label ·开" else label
+            v.setTextColor(if (on) pal.accent else pal.textSub)
+            v.background = Ui.tappable(
+                Ui.round(if (on) pal.surfaceAlt else pal.surface, Ui.dp(this, 14f),
+                    if (on) pal.accent else pal.line, Ui.dp(this, 1f)), pal.ripple)
+        }
+        paint(screenChip, OverlayService.screenOn, "看副屏")
+        paint(ballChip, OverlayService.ballOn, "悬浮球")
+        val n = Config.get(this, KEY_ROUNDS).toIntOrNull() ?: 0
+        paint(watchChip, n > 1, if (n > 1) "盯 $n 轮" else "盯着")
+    }
+
+    private fun watchDialog() {
+        val pad = Ui.dp(this, 20f)
+        val rounds = EditText(this).apply {
+            hint = "盯几轮(留空 = 只跑一次)"; setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(Config.get(this@MainActivity, KEY_ROUNDS))
+        }
+        val every = EditText(this).apply {
+            hint = "两轮至少隔几分钟(最少 ${Watch.MIN_GAP_MIN})"; setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(Config.get(this@MainActivity, KEY_EVERY))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("长时任务")
+            .setMessage("每次亮屏检查一轮,结果有变化才提醒你。")
+            .setView(Ui.col(this).apply {
+                setPadding(pad, Ui.dp(this@MainActivity, 8f), pad, 0)
+                addView(rounds); addView(every)
+            })
+            .setPositiveButton("好") { _, _ ->
+                Config.set(this, KEY_ROUNDS, rounds.text.toString().trim())
+                Config.set(this, KEY_EVERY, every.text.toString().trim())
+                syncChips()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun toggleVoice() {
+        if (voice != null) { stopVoice(); return }
+        if (!Voice.available(this)) { toast("这台机器上没有可用的语音识别"); return }
+        if (!Voice.micGranted(this)) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC); return
+        }
+        micBtn.setTextColor(pal.bad)
+        input.hint = "在听…"
+        voice = Voice(this,
+            onPartial = { t -> input.setText(t); input.setSelection(input.text.length) },
+            onFinal = { t ->
+                stopVoice()
+                if (t.isBlank()) toast("没听清,再说一次")
+                else { input.setText(t); input.setSelection(t.length) }
+            },
+            onError = { m -> stopVoice(); toast(m) },
+        ).also { it.start() }
+    }
+
+    private fun stopVoice() {
+        voice?.stop(); voice = null
+        micBtn.setTextColor(pal.accent)
+        input.hint = "说一句你要它做什么"
+    }
+
+    override fun onRequestPermissionsResult(req: Int, p: Array<out String>, r: IntArray) {
+        super.onRequestPermissionsResult(req, p, r)
+        if (req == REQ_MIC && r.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            toggleVoice()
+    }
+
+    // ---- 状态 ----
+
+    override fun onStart() {
+        super.onStart()
+        AgentBus.subscribe(onBus)
+        OverlayService.onStateChanged(onOverlay)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        AgentBus.unsubscribe(onBus)
+        OverlayService.offStateChanged(onOverlay)
+        stopVoice()
     }
 
     override fun onResume() {
         super.onResume()
-        refresh()
+        refreshStatus(); syncChips(); syncSendButton()
     }
 
     /**
-     * Shizuku 没在运行的时候,「授权」这个按钮是点不动的:权限请求要发给 Shizuku 的
-     * 服务,服务都没起来,点下去只会静默失败 —— 机主看到的是「按了没反应」。
-     *
-     * 而**没有任何 app 能替他启动那个服务**。它必须由 shell(uid 2000)或 root 拉起;
-     * 普通 app 能拉起它的话,Shizuku 这套东西就没有意义了。所以这里不去「自动启动」,
-     * 只把他送到能启动的地方:打开 Shizuku,在里面用「通过无线调试启动」自己拉起
-     * (Android 11 起支持,不需要电脑)。
+     * Shizuku 的服务必须由 shell(uid 2000)或 root 拉起,没有任何 app 能替他启动 ——
+     * 那是它的安全边界。所以这里不去「自动启动」,只把机主送到能启动的地方。
      */
     private fun onShizuku() {
-        if (Privileged.shizukuAlive()) { Privileged.requestPermission(); refresh(); return }
+        if (Privileged.shizukuAlive()) { Privileged.requestPermission(); refreshStatus(); return }
         val i = packageManager.getLaunchIntentForPackage(SHIZUKU_PKG)
         if (i == null) { toast("没装 Shizuku,先装它"); return }
         startActivity(i)
     }
 
-    private fun refresh() {
+    private fun refreshStatus() {
         val a11y = EyesAndHands.instance != null
         val alive = Privileged.shizukuAlive()
         val granted = Privileged.shizukuGranted()
-        // 无障碍平时**本来就是关的** —— A11yGate 在开工时自己开、收工自己关,
-        // 这样机主不干活的时候不会因为挂着一个能点击的无障碍服务而付不了微信。
-        // 所以这一行显示「未就绪」是在把正常静息状态报成故障:机主会去找哪里坏了,
-        // 而实际上没有任何东西要他处理。能自动开的时候就得这么说。
+        // 无障碍平时本来就是关的 —— A11yGate 开工时自己开、收工自己关,这样机主不干活的
+        // 时候不会因为挂着一个能点击的无障碍服务而付不了微信。把这个正常静息状态报成
+        // 「未就绪」会让他去找哪里坏了,而实际上没有任何事要他处理。
         val autoA11y = Config.get(this, A11yGate.KEY_AUTO, "1") != "0" && Privileged.ready
-        status.text = buildString {
-            appendLine("无障碍服务(眼睛和手)  " + when {
-                a11y -> "已就绪"
-                autoA11y -> "开工时自动开(不常驻)"
-                else -> "未就绪"
+        val allGood = Privileged.ready && (a11y || autoA11y)
+        pill.text = if (allGood) "就绪" else if (alive) "还差一步" else "未就绪"
+        pill.setTextColor(if (allGood) pal.ok else pal.warn)
+        detail.text = buildString {
+            appendLine("无障碍(眼睛和手)  " + when {
+                a11y -> "已就绪"; autoA11y -> "开工时自动开(不常驻)"; else -> "未就绪"
             })
-            appendLine("Shizuku 在运行          ${tick(alive)}")
-            appendLine("Shizuku 已授权          ${tick(granted)}")
-            appendLine("特权桥(造副屏/按键)   ${tick(Privileged.ready)}")
-            // 「未就绪」本身不告诉他该做什么。Shizuku 的服务每次重启手机都会没,
-            // 这是 Shizuku 的性质不是这个 app 的毛病 —— 但不说出来,机主只会看到
-            // 一个点不动的授权按钮。
-            if (!alive) appendLine("Shizuku 每次重启手机都要重开一次:点下面那个按钮进去,用「通过无线调试启动」")
+            appendLine("Shizuku 在运行      ${tick(alive)}")
+            appendLine("Shizuku 已授权      ${tick(granted)}")
+            append("特权桥(造副屏)     ${tick(Privileged.ready)}")
+            if (!alive) append("\n\nShizuku 每次重启手机都要重开:进它的 app,用「通过无线调试启动」")
+            if (!a11y && !autoA11y)
+                append("\n手动开无障碍:设置 → 辅助功能 → 已安装的应用程序 → WhalePhone Agent")
         }
-        shizukuBtn.text = if (alive) "授权 Shizuku" else "打开 Shizuku 去启动它"
-        // 自动开得了就不提这茬 —— 机主没有任何要处理的事,多一行只会让他去找哪里坏了
-        manualA11y.visibility = if (a11y || autoA11y) View.GONE else View.VISIBLE
         if (alive && granted && !Privileged.ready) {
-            thread { Privileged.connect(this); runOnUiThread { refresh() } }
+            thread { Privileged.connect(this); runOnUiThread { refreshStatus() } }
         }
     }
 
     private fun tick(b: Boolean) = if (b) "已就绪" else "未就绪"
-
-    private companion object { const val SHIZUKU_PKG = "moe.shizuku.privileged.api" }
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    private companion object {
+        const val SHIZUKU_PKG = "moe.shizuku.privileged.api"
+        const val REQ_MIC = 42
+        const val KEY_ROUNDS = "WATCH_ROUNDS"
+        const val KEY_EVERY = "WATCH_EVERY_MIN"
+    }
 }

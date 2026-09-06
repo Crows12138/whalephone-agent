@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      平台自带主题,不引 androidx/material。去掉标题栏:界面自己画了顶栏。
+      深浅色由 values-night 那一份换,颜色本身在代码里(Palette)。
+    -->
+    <style name="WP" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+</resources>
