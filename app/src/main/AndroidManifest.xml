@@ -9,6 +9,17 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!--
+      悬浮球和副屏取景窗要往机主那块屏上加窗口。这个权限只能由机主在系统设置里给,
+      app 自己拿不到,所以两个悬浮窗默认都是关的。
+      两个窗口都带 FLAG_NOT_FOCUSABLE —— 理由见 Overlay.kt 顶部。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 悬浮球的语音输入。用进程内的 SpeechRecognizer,不拉起识别界面 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 只在识别那几秒把悬浮窗服务升成 microphone 类型,见 OverlayService.micMode -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!--
       Android 11+ 默认看不见别的 app。不声明这一段,queryIntentActivities 返回近乎空,
       于是「把用户说的『计算器』解析成包名」这件事在自己的 PackageManager 里做不了。
       只查带 LAUNCHER 入口的 app,不申请 QUERY_ALL_PACKAGES —— 后者是敏感权限,
@@ -57,6 +68,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- 开机把机主上次留着的悬浮窗恢复回来,见 BootReceiver -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".AgentService"
             android:exported="false"
@@ -64,6 +85,19 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="agent-on-secondary-display" />
+        </service>
+
+        <!--
+          悬浮窗的宿主。前台服务,因为悬浮球的意义就是「不打开 app 也在」;
+          通知走最低优先级,点它就能把两个窗口一起收起。
+        -->
+        <service
+            android:name=".OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|microphone">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user-invoked-floating-controls" />
         </service>
 
         <service

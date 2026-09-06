@@ -41,6 +41,8 @@ class AgentService : Service() {
         startForeground(NOTI_ID, notify("准备中", goal))
         if (worker?.isAlive == true) { note("已经有任务在跑了"); return START_STICKY }
 
+        AgentBus.post(AgentBus.Kind.GOAL, goal)
+        AgentBus.setRunning(true)
         stopping = false
         worker = thread(name = "wp-agent") { runTask(goal) }
         return START_STICKY
@@ -121,7 +123,12 @@ class AgentService : Service() {
 
         val hands = Hands(probe, displayId, this)
         val agent = Agent(hands, llm, goal)
-        agent.onStep = { s -> if (!stopping) update("第 ${s.n} 步 · ${s.action}", s.result.take(80)) }
+        agent.onStep = { s ->
+            if (!stopping) {
+                update("第 ${s.n} 步 · ${s.action}", s.result.take(80))
+                AgentBus.post(AgentBus.Kind.STEP, "第 ${s.n} 步 · ${s.action}", s.result)
+            }
+        }
         agent.onAsk = { q -> ask(q) }
 
         val out = runCatching { agent.run() }.getOrElse {
@@ -135,7 +142,7 @@ class AgentService : Service() {
             val changed = Watch.record(this, out.message)
             if (Watch.roundsLeft(this) <= 0) {
                 Watch.clear(this)
-                finish("盯完了。最后一次的结果:${out.message}")
+                finish("盯完了。最后一次的结果:${out.message}", ok = true)
             } else {
                 if (changed) alert("有变化", out.message)
                 update("盯着呢 · ${Watch.statusLine(this)}", out.message)
@@ -143,7 +150,7 @@ class AgentService : Service() {
             }
             return
         }
-        finish(out.message)
+        finish(out.message, ok = out.done)
     }
 
     /**
@@ -185,6 +192,7 @@ class AgentService : Service() {
      */
     private fun stop() {
         stopping = true
+        AgentBus.setRunning(false)
         worker?.interrupt()
         // 机主明确点了停止,长时任务也已经被 Watch.clear 清掉,权限没有留着的理由
         runCatching { A11yGate.close(this) }
@@ -193,7 +201,7 @@ class AgentService : Service() {
         stopSelf()
     }
 
-    private fun finish(msg: String) {
+    private fun finish(msg: String, ok: Boolean = false) {
         // 所有提前收尾的理由(机主一直在打字、副屏没造成、没有眼睛)原先在日志里
         // 一个字都不留 —— 只有正常跑完那条路径打了「结束 done=」。
         // 出问题时看到的就是「agent 没反应」,查不到它为什么没干活。收尾在这里统一记一次。
@@ -209,6 +217,8 @@ class AgentService : Service() {
         // 一次性任务结束也留着副屏:用户很可能接着下一个任务,重造一次就多抖一次。
         // 真正销毁只发生在用户点「停止」,或者服务被系统回收。
         update("任务结束", msg, ongoing = false)
+        AgentBus.post(if (ok) AgentBus.Kind.RESULT else AgentBus.Kind.FAIL, msg)
+        AgentBus.setRunning(false)
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
@@ -261,7 +271,10 @@ class AgentService : Service() {
     private fun update(title: String, body: String, ongoing: Boolean = true) =
         nm().notify(NOTI_ID, notify(title, body, ongoing))
 
-    private fun note(body: String) = update("手机助理", body)
+    private fun note(body: String) {
+        update("手机助理", body)
+        AgentBus.post(AgentBus.Kind.NOTE, body)
+    }
 
     /** 需要用户注意但不需要他拍板的事,比如盯着的价格变了 */
     private fun alert(title: String, body: String) {
@@ -279,6 +292,7 @@ class AgentService : Service() {
     }
 
     private fun ask(q: String) {
+        AgentBus.post(AgentBus.Kind.ASK, q)
         channel()
         nm().notify(
             NOTI_ASK,
@@ -310,6 +324,9 @@ class AgentService : Service() {
 
         /** 副屏跨任务复用,所以挂在伴生对象上而不是实例上 */
         @Volatile private var shared: AgentDisplay? = null
+
+        /** 取景窗要按帧读这块屏。只读,不许外面动它的生命周期。 */
+        val liveDisplay: AgentDisplay? get() = shared
         const val FEED_PATH = "/sdcard/Download/wp_vd.png"
 
         fun start(ctx: Context, goal: String) {

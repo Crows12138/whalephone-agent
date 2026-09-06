@@ -41,6 +41,38 @@ class AgentDisplay private constructor(
         if (flags and ShellBridge.SHOULD_SHOW_SYSTEM_DECORATIONS != 0) add("有独立系统装饰")
     }.joinToString(" / ")
 
+    /**
+     * 取景窗那条路复用的位图。
+     *
+     * 1080x2340 的 ARGB_8888 是 10 MB —— 取景窗一秒抓五帧,每帧新分配一张的话
+     * 是 50 MB/s 的垃圾,GC 会把机主那块屏一起卡住(这个 app 的全部意义就是不卡他)。
+     * 所以连续取帧走 [captureLive],复用同一张;一次性截图仍然走 [capture],
+     * 那条要把位图交出去,不能被下一帧覆盖。
+     */
+    private var live: Bitmap? = null
+
+    /** 连续取帧用。返回的位图**下一次调用就会被覆盖**,只能当场画掉,不能存。 */
+    @Synchronized
+    fun captureLive(): Bitmap? {
+        val img = reader.acquireLatestImage() ?: return live
+        return try {
+            val plane = img.planes[0]
+            val stride = plane.rowStride / plane.pixelStride
+            val b = live?.takeIf { it.width == stride && it.height == height }
+                ?: Bitmap.createBitmap(stride, height, Bitmap.Config.ARGB_8888).also { live = it }
+            b.copyPixelsFromBuffer(plane.buffer)
+            b
+        } catch (t: Throwable) {
+            Log.e(TAG, "captureLive 失败", t); null
+        } finally {
+            img.close()
+        }
+    }
+
+    /** 位图右边可能多出 rowStride 的补白,画的时候要按这个宽度裁 */
+    val liveVisibleWidth get() = width
+
+    @Synchronized
     fun capture(): Bitmap? {
         val img = reader.acquireLatestImage() ?: return null
         return try {
@@ -59,6 +91,7 @@ class AgentDisplay private constructor(
     }
 
     /** 先写临时文件再改名。直接写目标文件的话,外面拉取时会撞上写了一半的 PNG。 */
+    @Synchronized
     fun captureTo(path: String): Boolean {
         val bmp = capture() ?: return false
         return runCatching {
@@ -68,9 +101,11 @@ class AgentDisplay private constructor(
         }.getOrDefault(false)
     }
 
+    @Synchronized
     fun release() {
         Privileged.release(displayId)
         runCatching { reader.close() }
+        live?.recycle(); live = null
     }
 
     companion object {

@@ -1,0 +1,657 @@
+package ai.whalephone.agent
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.RectF
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+
+/**
+ * 主屏上的两个悬浮窗:悬浮球,和副屏取景窗。
+ *
+ * 这里是整个 app 里唯一**主动在机主那块屏上放东西**的地方,所以规矩要写死在最前面:
+ *
+ *   1. 两个窗口都带 FLAG_NOT_FOCUSABLE。主屏的焦点窗口一变,IMMS 就会重算输入法目标,
+ *      机主正在打的字会被收掉 —— 这个 app 花了最多力气解决的就是这件事,不能自己
+ *      从悬浮窗这条路又把它做一遍。唯一的例外是机主主动点开输入面板要打字,
+ *      那一刻才临时把这个标志摘掉,关掉立刻加回来。
+ *   2. 都是机主自己开的,而且随时能关。默认全关。
+ *   3. 取景窗只读画面,不接受任何对副屏的操作 —— 它是个窗口,不是遥控器。
+ *      副屏上的操作只由 agent 做,机主要插手就直接说话/打字下任务。
+ *
+ * 服务是前台服务,因为悬浮球的意义就是「不打开 app 也在」。通知走最低优先级,
+ * 且点它就能关掉悬浮球 —— 常驻的东西必须有一个显而易见的出口。
+ */
+class OverlayService : Service() {
+
+    private lateinit var wm: WindowManager
+    private var ball: Ball? = null
+    private var screen: ScreenWindow? = null
+
+    override fun onBind(i: Intent?) = null
+
+    override fun onCreate() {
+        super.onCreate()
+        wm = getSystemService(WindowManager::class.java)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTI_ID, notification())
+        // intent 为空 = 进程被回收后系统按 START_STICKY 重新拉起来的。
+        // 这时候要按机主上次的选择恢复,不能一声不响地消失 —— 悬浮球的全部意义
+        // 就是「它一直在」,被系统回收一次就再也不回来的话,这个功能等于没有。
+        val action = intent?.action ?: restoreAction()
+        when (action) {
+            ACT_BALL_ON -> if (ball == null)
+                ball = Ball(this, wm, ::micMode).also { it.show() }
+            ACT_BALL_OFF -> { ball?.hide(); ball = null }
+            ACT_SCREEN_ON -> if (screen == null) screen = ScreenWindow(this, wm).also { it.show() }
+            ACT_SCREEN_OFF -> { screen?.hide(); screen = null }
+            ACT_STOP -> { stopAll(); return START_NOT_STICKY }
+        }
+        // 恢复那条路要两个窗口各自还原,上面的 when 一次只处理一个
+        if (intent == null) {
+            if (Config.get(this, KEY_BALL) == "1" && ball == null)
+                ball = Ball(this, wm, ::micMode).also { it.show() }
+            if (Config.get(this, KEY_SCREEN) == "1" && screen == null)
+                screen = ScreenWindow(this, wm).also { it.show() }
+        }
+        ballOn = ball != null
+        screenOn = screen != null
+        notifyState(this)
+        if (action == ACT_RESTORE && ball == null && screen == null) {
+            // 配置说该有窗口却一个都没建起来 —— 多半是权限被收回了。
+            // 这时候不能把配置清成 0,否则机主重新给权限之后还得再开一次。
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return START_NOT_STICKY
+        }
+        // 两个都关了就没有留着的理由。常驻服务要能自己消失,不能靠机主去清。
+        if (ball == null && screen == null) { stopAll(); return START_NOT_STICKY }
+        getSystemService(NotificationManager::class.java).notify(NOTI_ID, notification())
+        return START_STICKY
+    }
+
+    /**
+     * 识别期间把前台服务的类型临时升成 microphone。
+     *
+     * 不升的话录音会被系统挡掉,而且挡得很安静:appops 里 RECORD_AUDIO 是
+     * **foreground 模式** —— 只有进程状态够前台才放行,而「有个悬浮窗」不算。
+     * 真机上量到的就是 `RECORD_AUDIO: allow; rejectTime=+2s`,识别器那边只报一个
+     * ERROR_INSUFFICIENT_PERMISSIONS,看着像没给权限,其实权限早给了。
+     *
+     * 只在真正在听的时候升,听完降回去 —— 常驻一个 microphone 类型的前台服务,
+     * 系统会一直显示麦克风指示灯,而这个 app 平时根本不用麦克风。
+     */
+    private fun micMode(on: Boolean) {
+        val type = if (on)
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        else
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        runCatching { startForeground(NOTI_ID, notification(), type) }
+            .onFailure { Log.w(TAG, "切不了前台服务类型,语音可能录不上", it) }
+    }
+
+    /** 上次机主留着的是哪几个窗口。都没留就什么都不恢复,服务自己停掉。 */
+    private fun restoreAction(): String? =
+        if (Config.get(this, KEY_BALL) == "1" || Config.get(this, KEY_SCREEN) == "1")
+            ACT_RESTORE else null
+
+    private fun stopAll() {
+        ball?.hide(); ball = null
+        screen?.hide(); screen = null
+        ballOn = false; screenOn = false
+        notifyState(this)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        ball?.hide(); screen?.hide()
+        ball = null; screen = null
+        ballOn = false; screenOn = false
+        super.onDestroy()
+    }
+
+    private fun notification(): Notification {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                NotificationChannel(CH, "悬浮窗", NotificationManager.IMPORTANCE_MIN)
+                    .apply { description = "悬浮球和副屏取景窗还开着的时候显示" }
+            )
+        }
+        val off = PendingIntent.getService(
+            this, 0, Intent(this, OverlayService::class.java).setAction(ACT_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val what = listOfNotNull(
+            if (ball != null) "悬浮球" else null,
+            if (screen != null) "副屏取景窗" else null,
+        ).joinToString(" · ").ifBlank { "悬浮窗" }
+        return Notification.Builder(this, CH)
+            .setContentTitle("$what 开着")
+            .setContentText("点这里全部收起")
+            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setOngoing(true)
+            .setContentIntent(off)
+            .build()
+    }
+
+    companion object {
+        private const val TAG = "WPOverlay"
+        private const val CH = "overlay"
+        private const val NOTI_ID = 3
+
+        const val ACT_BALL_ON = "ai.whalephone.agent.BALL_ON"
+        const val ACT_BALL_OFF = "ai.whalephone.agent.BALL_OFF"
+        const val ACT_SCREEN_ON = "ai.whalephone.agent.SCREEN_ON"
+        const val ACT_SCREEN_OFF = "ai.whalephone.agent.SCREEN_OFF"
+        const val ACT_STOP = "ai.whalephone.agent.OVERLAY_STOP"
+        /** 开机 / 进程被回收后按上次的选择恢复 */
+        const val ACT_RESTORE = "ai.whalephone.agent.OVERLAY_RESTORE"
+
+        /** 配置项:两个开关各自记住上次的状态,方便重启后照旧 */
+        const val KEY_BALL = "OVERLAY_BALL"
+        const val KEY_SCREEN = "OVERLAY_SCREEN"
+
+        @Volatile var ballOn = false; private set
+        @Volatile var screenOn = false; private set
+
+        private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+        fun onStateChanged(l: () -> Unit) = listeners.add(l)
+        fun offStateChanged(l: () -> Unit) = listeners.remove(l)
+        private fun notifyState(ctx: Context) {
+            Config.set(ctx, KEY_BALL, if (ballOn) "1" else "0")
+            Config.set(ctx, KEY_SCREEN, if (screenOn) "1" else "0")
+            Handler(Looper.getMainLooper()).post { listeners.forEach { it() } }
+        }
+
+        fun granted(ctx: Context) = Settings.canDrawOverlays(ctx)
+
+        /** 去要悬浮窗权限。这个权限只能由机主在系统设置里给,没有别的路。 */
+        fun requestPermission(ctx: Context) = ctx.startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${ctx.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+
+        fun setBall(ctx: Context, on: Boolean) = send(ctx, if (on) ACT_BALL_ON else ACT_BALL_OFF)
+        fun setScreen(ctx: Context, on: Boolean) = send(ctx, if (on) ACT_SCREEN_ON else ACT_SCREEN_OFF)
+
+        private fun send(ctx: Context, action: String) {
+            val i = Intent(ctx, OverlayService::class.java).setAction(action)
+            // 关的时候服务可能已经没了,startForegroundService 会白起一次再自己停,
+            // 不影响正确性但会闪一下通知 —— 所以只在开的时候用前台启动。
+            if (action.endsWith("_ON")) ctx.startForegroundService(i) else ctx.startService(i)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * 悬浮窗的共同部分:不抢焦点、可拖动、贴边。
+ *
+ * FLAG_NOT_FOCUSABLE 是这里的核心约束,不是随手加的选项 —— 见 OverlayService 的说明。
+ * FLAG_LAYOUT_NO_LIMITS 让窗口可以拖到状态栏/导航栏区域,否则贴边会贴出一条缝。
+ */
+abstract class FloatWindow(protected val ctx: Context, private val wm: WindowManager) {
+
+    protected val pal = Palette.of(ctx)
+    protected val lp = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+        PixelFormat.TRANSLUCENT,
+    ).apply { gravity = Gravity.TOP or Gravity.START }
+
+    private var root: View? = null
+    protected var added = false; private set
+
+    abstract fun build(): View
+
+    open fun show() {
+        if (added) return
+        val v = build()
+        root = v
+        runCatching { wm.addView(v, lp) }
+            .onFailure { Log.e("WPOverlay", "悬浮窗加不上去(没给权限?)", it); return }
+        added = true
+    }
+
+    open fun hide() {
+        val v = root ?: return
+        runCatching { wm.removeView(v) }
+        root = null; added = false
+    }
+
+    protected fun apply() { root?.let { runCatching { wm.updateViewLayout(it, lp) } } }
+
+    /** 临时让窗口可获焦(机主要在里面打字时)。用完必须还回去。 */
+    protected fun focusable(on: Boolean) {
+        lp.flags = if (on)
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        else
+            lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        apply()
+    }
+
+    protected fun screenSize(): Pair<Int, Int> {
+        val m = ctx.resources.displayMetrics
+        return m.widthPixels to m.heightPixels
+    }
+
+    /**
+     * 把一个 View 变成「拖着能挪整个窗口」。
+     *
+     * 用触摸斜率区分拖动和点击:超过 touchSlop 才算拖,否则当点击交给 onClick。
+     * 不这么分的话手指稍微一抖点击就丢了,而悬浮球主要靠点。
+     */
+    protected fun draggable(v: View, onTap: (() -> Unit)? = null, onDrop: (() -> Unit)? = null) {
+        val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+        var downX = 0f; var downY = 0f; var ox = 0; var oy = 0; var dragging = false
+        v.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY; ox = lp.x; oy = lp.y; dragging = false; true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (!dragging && (abs(dx) > slop || abs(dy) > slop)) dragging = true
+                    if (dragging) { lp.x = ox + dx.toInt(); lp.y = oy + dy.toInt(); apply() }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) onDrop?.invoke()
+                    else if (e.actionMasked == MotionEvent.ACTION_UP) onTap?.invoke()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * 副屏取景窗。
+ *
+ * 副屏是看不见的 —— 那正是它存在的理由,但也意味着机主没法知道 agent 到底在干什么,
+ * 只能读通知里的一行字。这个窗口把那块屏的画面按帧搬到主屏一角,机主想看就看。
+ *
+ * 画面来源是 AgentDisplay 的 ImageReader,和 agent 自己截图用的是同一个出口 ——
+ * 不新开一路采集,也就不多占一份内存。取帧走 captureLive:复用同一张位图,
+ * 每帧 10 MB 的分配换成 10 MB 的拷贝(见那边的说明)。
+ *
+ * 只读。窗口上没有任何能操作副屏的东西,理由写在 OverlayService 顶部。
+ */
+class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
+
+    private val fps = 5
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var canvasView: Frame
+    private lateinit var hint: TextView
+
+    private var full = -1
+    private var hasDisplay: Boolean? = null
+
+    private val pump = object : Runnable {
+        override fun run() {
+            if (!added) return
+            // 有没有副屏这件事在这里判,不在 onDraw 里判 —— 画的时候改别人的可见性
+            // 会在同一帧里触发一次重新布局,安卓会警告 requestLayout during layout。
+            val now = AgentService.liveDisplay != null
+            if (now != hasDisplay) {
+                hasDisplay = now
+                hint.visibility = if (now) View.GONE else View.VISIBLE
+                canvasView.visibility = if (now) View.VISIBLE else View.GONE
+                // 没有副屏的时候把窗口缩成一条提示,别在机主屏幕上占一大块空白
+                lp.height = if (now) full else WindowManager.LayoutParams.WRAP_CONTENT
+                apply()
+            }
+            if (now) canvasView.invalidate()
+            handler.postDelayed(this, (1000L / fps))
+        }
+    }
+
+    override fun build(): View {
+        val r = Ui.dp(ctx, 14f)
+        val (sw, sh) = screenSize()
+        // 默认占屏宽三分之一,高度按主屏比例 —— 副屏就是照主屏的形状造的
+        val w = (sw * 0.34f).toInt()
+        val h = (w * sh.toFloat() / sw).toInt()
+        lp.width = w
+        full = h + Ui.dp(ctx, 30f)
+        lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+        lp.x = sw - w - Ui.dp(ctx, 12f)
+        lp.y = Ui.dp(ctx, 90f)
+
+        val box = Ui.col(ctx).apply {
+            background = Ui.round(pal.surface, r, pal.line, Ui.dp(ctx, 1f))
+            clipToOutline = true
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: View, o: android.graphics.Outline) =
+                    o.setRoundRect(0, 0, v.width, v.height, r.toFloat())
+            }
+        }
+
+        val bar = Ui.row(ctx).apply {
+            setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 5f), Ui.dp(ctx, 4f), Ui.dp(ctx, 5f))
+            addView(Ui.text(ctx, "副屏", 12f, pal.textSub, bold = true), Ui.lp(Ui.WRAP, Ui.WRAP))
+            addView(View(ctx), Ui.lp(0, 1, 1f))
+            addView(Ui.text(ctx, "✕", 15f, pal.textSub).apply {
+                setPadding(Ui.dp(ctx, 8f), 0, Ui.dp(ctx, 8f), 0)
+                setOnClickListener { OverlayService.setScreen(ctx, false) }
+            }, Ui.lp(Ui.WRAP, Ui.WRAP))
+        }
+        draggable(bar)
+
+        canvasView = Frame(ctx)
+        hint = Ui.text(ctx, "副屏还没建起来 —— 下个任务开始时会出现", 11f, pal.textSub).apply {
+            setPadding(Ui.dp(ctx, 12f), Ui.dp(ctx, 12f), Ui.dp(ctx, 12f), Ui.dp(ctx, 12f))
+        }
+
+        box.addView(bar, Ui.lp(Ui.MATCH, Ui.WRAP))
+        box.addView(hint, Ui.lp(Ui.MATCH, Ui.WRAP))
+        box.addView(canvasView, Ui.lp(Ui.MATCH, 0, 1f))
+        return box
+    }
+
+    override fun show() {
+        super.show()
+        if (added) handler.post(pump)
+    }
+
+    override fun hide() {
+        handler.removeCallbacks(pump)
+        super.hide()
+    }
+
+    /** 直接画位图,不走 ImageView —— 省一次 setImageBitmap 带来的整层重建 */
+    private inner class Frame(c: Context) : View(c) {
+        private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        private val src = Rect()
+        private val dst = RectF()
+
+        override fun onDraw(canvas: Canvas) {
+            val d = AgentService.liveDisplay
+            val bmp: Bitmap? = d?.let { runCatching { it.captureLive() }.getOrNull() }
+            if (d == null || bmp == null || bmp.isRecycled) {
+                canvas.drawColor(pal.surfaceAlt)
+                return
+            }
+            canvas.drawColor(Color.BLACK)
+            // 位图右侧可能带 rowStride 补白,按可见宽度裁掉,否则画面会被压扁一条
+            src.set(0, 0, min(d.liveVisibleWidth, bmp.width), bmp.height)
+            val scale = min(width.toFloat() / src.width(), height.toFloat() / src.height())
+            val dw = src.width() * scale; val dh = src.height() * scale
+            dst.set((width - dw) / 2f, (height - dh) / 2f, (width + dw) / 2f, (height + dh) / 2f)
+            canvas.drawBitmap(bmp, src, dst, paint)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * 悬浮球。不打开 app 也能下任务。
+ *
+ * 收起状态是一个小圆球,点开是一条输入栏:麦克风 + 文本框 + 发送。
+ * 语音走 Voice(系统识别器,进程内,不拉起任何界面)—— 用 RecognizerIntent 的话
+ * 会起一个全屏 Activity,那是一次真正的界面打断,和这个 app 的立场相反。
+ *
+ * 球本身永远不获焦。只有点开输入栏、机主要打字的那一刻才临时可获焦(否则
+ * 输入法根本不会为它弹出来),收起时立刻还回去。
+ */
+class Ball(
+    ctx: Context,
+    wm: WindowManager,
+    /** 通知宿主服务进出「在听」状态 —— 录音要靠它把前台服务类型升成 microphone */
+    private val micMode: (Boolean) -> Unit,
+) : FloatWindow(ctx, wm) {
+
+    private lateinit var bubble: TextView
+    private lateinit var panel: LinearLayout
+    private lateinit var input: EditText
+    private lateinit var mic: TextView
+    private lateinit var state: TextView
+    private var voice: Voice? = null
+    private var open = false
+    private var restX = 0
+    private var restY = 0
+
+    /** 收起状态下的窗口标志:不获焦、可拖到状态栏底下 */
+    private val restFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+
+    /**
+     * 展开状态:要获焦(不然输入法不会为它弹出来),但必须**不吃掉别处的触摸** ——
+     * 可获焦的窗口默认是 touch-modal,而这条面板横贯屏宽,不加 NOT_TOUCH_MODAL 的话
+     * 机主点屏幕上任何地方都会被它接住。WATCH_OUTSIDE_TOUCH 是为了点外面能收起。
+     */
+    private val openFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+        WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+
+    override fun build(): View {
+        val (sw, sh) = screenSize()
+        lp.x = sw - Ui.dp(ctx, 58f); lp.y = (sh * 0.55f).toInt()
+        restX = lp.x; restY = lp.y
+
+        bubble = Ui.text(ctx, "鲸", 17f, pal.onAccent, bold = true).apply {
+            gravity = Gravity.CENTER
+            background = Ui.round(pal.accent, Ui.dp(ctx, 26f))
+            elevation = Ui.dp(ctx, 6f).toFloat()
+        }
+        draggable(bubble, onTap = { toggle() }, onDrop = { snap() })
+
+        panel = buildPanel()
+        panel.visibility = View.GONE
+
+        return Root(ctx).apply {
+            addView(panel, Ui.lp(Ui.MATCH, Ui.WRAP))
+            addView(bubble, Ui.lp(Ui.dp(ctx, 52f), Ui.dp(ctx, 52f)))
+        }
+    }
+
+    /**
+     * 展开时窗口可获焦,于是它会收到返回键 —— 机主按返回的第一意图是「关掉这个面板」,
+     * 不是退出他底下那个 App。不接这一下的话返回会穿过去,把他正在看的东西退掉。
+     * 面板外面的点击(ACTION_OUTSIDE)同样收起。
+     */
+    private inner class Root(c: Context) : LinearLayout(c) {
+        init { orientation = VERTICAL }
+        override fun dispatchKeyEvent(e: android.view.KeyEvent): Boolean {
+            if (open && e.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                e.action == android.view.KeyEvent.ACTION_UP) { toggle(); return true }
+            return super.dispatchKeyEvent(e)
+        }
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            if (open && e.actionMasked == MotionEvent.ACTION_OUTSIDE) { toggle(); return true }
+            return super.onTouchEvent(e)
+        }
+    }
+
+    private fun buildPanel(): LinearLayout {
+        val r = Ui.dp(ctx, 24f)
+        state = Ui.text(ctx, "", 11f, pal.textSub).apply {
+            setPadding(Ui.dp(ctx, 16f), 0, Ui.dp(ctx, 16f), Ui.dp(ctx, 6f))
+            visibility = View.GONE
+        }
+        mic = Ui.text(ctx, MIC, 17f, pal.accent).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 19f)), pal.ripple)
+            setOnClickListener { toggleVoice() }
+        }
+        input = EditText(ctx).apply {
+            hint = "说一句你要它做什么"
+            setHintTextColor(pal.textSub)
+            setTextColor(pal.textMain)
+            textSize = 15f
+            setSingleLine()
+            background = null
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            setOnEditorActionListener { _, _, _ -> send(); true }
+        }
+        val go = Ui.text(ctx, SEND, 16f, pal.onAccent).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(pal.accent, Ui.dp(ctx, 19f)), pal.ripple)
+            setOnClickListener { send() }
+        }
+        val bar = Ui.row(ctx).apply {
+            setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 7f), Ui.dp(ctx, 10f), Ui.dp(ctx, 7f))
+            addView(mic, Ui.lp(Ui.dp(ctx, 38f), Ui.dp(ctx, 38f)))
+            addView(input, Ui.lp(0, Ui.WRAP, 1f).apply {
+                marginStart = Ui.dp(ctx, 10f); marginEnd = Ui.dp(ctx, 10f)
+            })
+            addView(go, Ui.lp(Ui.dp(ctx, 38f), Ui.dp(ctx, 38f)))
+        }
+        return Ui.col(ctx).apply {
+            background = Ui.round(pal.surface, r, pal.line, Ui.dp(ctx, 1f))
+            elevation = Ui.dp(ctx, 10f).toFloat()
+            addView(bar, Ui.lp(Ui.MATCH, Ui.WRAP))
+            addView(state, Ui.lp(Ui.MATCH, Ui.WRAP))
+        }
+    }
+
+    /**
+     * 展开 / 收起。
+     *
+     * 展开时球本身藏起来,只剩一条贴在屏幕下沿的输入栏。原来是「面板挂在球上方」,
+     * 结果球会从右边跳到屏幕中间给面板让位置,看着像出了 bug。贴下沿还顺带解决了
+     * 另一件事:输入法弹出来时面板正好被顶在键盘上面,不用自己去算键盘高度。
+     *
+     * 展开这一下会把主屏的焦点从机主的 App 拿过来 —— 这是整个 app 里唯一一处主动抢焦点,
+     * 前提是机主自己点的球,而且收起时立刻还回去。
+     */
+    private fun toggle() {
+        open = !open
+        val (sw, _) = screenSize()
+        if (open) {
+            panel.visibility = View.VISIBLE
+            bubble.visibility = View.GONE
+            lp.flags = openFlags
+            lp.width = sw - Ui.dp(ctx, 20f)
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.BOTTOM or Gravity.START
+            lp.x = Ui.dp(ctx, 10f)
+            lp.y = Ui.dp(ctx, 12f)
+            // 不写这一句,输入法认为这个窗口不需要它:面板出来了键盘不弹(真机上量到过)
+            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+            apply()
+            input.requestFocus()
+            // ADJUST_RESIZE 只是允许弹,真正把它叫起来还得显式要一次
+            input.post { ime()?.showSoftInput(input, 0) }
+        } else {
+            stopVoice()
+            input.setText("")
+            state.visibility = View.GONE
+            runCatching { ime()?.hideSoftInputFromWindow(input.windowToken, 0) }
+            panel.visibility = View.GONE
+            bubble.visibility = View.VISIBLE
+            lp.flags = restFlags
+            lp.width = WindowManager.LayoutParams.WRAP_CONTENT
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+            lp.gravity = Gravity.TOP or Gravity.START
+            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+            lp.x = restX; lp.y = restY
+            apply()
+        }
+    }
+
+    private fun ime() =
+        ctx.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+
+    /** 松手后贴到最近的一边。悬浮球飘在屏幕中间会挡东西。 */
+    private fun snap() {
+        if (open) return
+        val (sw, sh) = screenSize()
+        lp.x = if (lp.x + Ui.dp(ctx, 26f) < sw / 2) Ui.dp(ctx, 6f) else sw - Ui.dp(ctx, 58f)
+        lp.y = max(Ui.dp(ctx, 40f), min(lp.y, sh - Ui.dp(ctx, 120f)))
+        restX = lp.x; restY = lp.y
+        apply()
+    }
+
+    private fun send() {
+        val g = input.text.toString().trim()
+        if (g.isBlank()) { flash("先说要做什么"); return }
+        if (Config.get(ctx, Config.KEY_API_KEY).isBlank()) {
+            flash("还没配模型密钥,先打开 app 设置一次"); return
+        }
+        AgentService.start(ctx, g)
+        input.setText("")
+        flash("已经派下去了,进度看通知")
+        Handler(Looper.getMainLooper()).postDelayed({ if (open) toggle() }, 900)
+    }
+
+    private fun flash(s: String) {
+        state.text = s
+        state.visibility = View.VISIBLE
+    }
+
+    private fun toggleVoice() {
+        if (voice != null) { stopVoice(); return }
+        if (!Voice.available(ctx)) { flash("这台机器上没有可用的语音识别"); return }
+        if (!Voice.micGranted(ctx)) { flash("还没给录音权限 —— 打开 app,设置里给一次"); return }
+        micMode(true)
+        mic.setTextColor(pal.bad)
+        flash("在听…")
+        voice = Voice(ctx,
+            onPartial = { t -> input.setText(t); input.setSelection(input.text.length) },
+            onFinal = { t ->
+                stopVoice()
+                if (t.isBlank()) flash("没听清,再说一次") else { input.setText(t); send() }
+            },
+            onError = { msg -> stopVoice(); flash(msg) },
+        ).also { it.start() }
+    }
+
+    private fun stopVoice() {
+        val had = voice != null
+        voice?.stop(); voice = null
+        mic.setTextColor(pal.accent)
+        if (had) micMode(false)
+    }
+
+    override fun hide() {
+        stopVoice()
+        super.hide()
+    }
+
+    private companion object {
+        const val MIC = "\uD83C\uDFA4"
+        const val SEND = "\u27A4"
+    }
+}
