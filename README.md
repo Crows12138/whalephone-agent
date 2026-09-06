@@ -65,6 +65,16 @@ task 归属、副屏销毁。最难的是焦点,结论实测出来的:副屏上�
 
 DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_url 和 model 即可。
 
+## Shizuku 每次重启手机都要重开
+
+Shizuku 的服务必须由 shell(uid 2000)或 root 拉起 —— 普通 app 拉不起来,这是它的
+安全边界,不是缺口。所以手机一重启就得重开一次,两条路任选:
+
+- **手机上**:开发者选项打开「无线调试」→ 打开 Shizuku →「通过无线调试启动」
+- **电脑上**:`bash scripts/start-shizuku.sh`
+
+WhalePhone 界面上那个按钮会跟着状态变:服务没跑时它是「打开 Shizuku 去启动它」。
+
 ## 其余文档
 
 [TECH-CHOICES.md](TECH-CHOICES.md) 技术选型:候选路线的淘汰过程、八类资源竞争、动作空间
