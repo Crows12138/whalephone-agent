@@ -134,3 +134,10 @@ shell 侧的动作:
 虚拟屏本身没泄漏(只剩 0 和当前那块)。模拟器上堆到几十条时软键盘会叫不起来;
 真机这一夜没出现,但**演示前重启一次手机**更稳妥。查看:
 `adb shell dumpsys input_method | grep -c ClientState`。
+
+**反复改 user service 版本号会留下一堆 `:bridge` 进程。** Shizuku 按
+(包名, 类名, 版本, tag) 认 user service,版本一变就起一个新的,旧的还在。
+攒到三个的时候连着两轮任务下发之后 app 那边一行日志都没有(广播像是没到),
+杀光 `ai.whalephone.agent*` 进程再跑就正常。只观察到相关性,没深挖 ——
+正常使用不会改版本号,碰不到。
+`adb shell ps -A | grep whalephone` 看有几个。

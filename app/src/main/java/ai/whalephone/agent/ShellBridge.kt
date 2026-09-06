@@ -27,6 +27,9 @@ class ShellBridge : IShellBridge.Stub {
         runCatching { ctx() }.onFailure { Log.w(TAG, "预热 Context 失败,留给首次调用重试", it) }
     }
 
+    /** WindowManager.LayoutParams.DISPLAY_IME_POLICY_HIDE —— 这块屏不显示输入法 */
+    private val DISPLAY_IME_POLICY_HIDE = 2
+
     override fun destroy() {
         synchronized(displays) {
             displays.values.forEach { runCatching { it.release() } }
@@ -66,10 +69,47 @@ class ShellBridge : IShellBridge.Stub {
             val id = vd.display.displayId
             synchronized(displays) { displays[id] = vd }
             Log.i(TAG, "虚拟屏已创建 id=$id ${w}x$h@$dpi flags=0x${flags.toString(16)}")
+            hideImeOn(id)
             id
         }.getOrElse {
             Log.e(TAG, "createDisplay 失败 flags=0x${flags.toString(16)}", it)
             -1
+        }
+    }
+
+    /**
+     * 告诉窗口管理器:这块副屏永远不要输入法。
+     *
+     * 不设的话,副屏上的 App 一要输入法,**机主主屏上的键盘就会弹出来**。
+     * 这不是我们调了输入法 —— 整机只有一个 IME,实测 `mDisplayIdToShowIme` 恒为 0,
+     * 所以任何一块屏上的输入框请求输入法,系统都只能弹到机主那块屏上。真机上就是
+     * agent 点一下淘宝搜索栏,搜索页给输入框自动对焦,机主眼前的键盘就自己冒出来
+     * 再落下去。机主看到的是「它在动我的输入法」。
+     *
+     * agent 自己从不需要输入法:填字走 ACTION_SET_TEXT,按键走 `input -d <屏>`。
+     * 所以这块屏的正确策略就是 HIDE —— 副屏上的输入框该对焦对焦,只是不再有人
+     * 替它把键盘弹到别人脸上。
+     *
+     * 权限上能不能设通,文档查不到,只能试;设不通就照旧,不影响别的。
+     */
+    private fun hideImeOn(displayId: Int) {
+        runCatching {
+            val wm = Class.forName("android.view.WindowManagerGlobal")
+                .getMethod("getWindowManagerService").invoke(null)!!
+            val before = runCatching {
+                wm.javaClass.getMethod("getDisplayImePolicy", Int::class.javaPrimitiveType)
+                    .invoke(wm, displayId)
+            }.getOrNull()
+            wm.javaClass.getMethod(
+                "setDisplayImePolicy", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                .invoke(wm, displayId, DISPLAY_IME_POLICY_HIDE)
+            val after = runCatching {
+                wm.javaClass.getMethod("getDisplayImePolicy", Int::class.javaPrimitiveType)
+                    .invoke(wm, displayId)
+            }.getOrNull()
+            Log.i(TAG, "副屏 $displayId 输入法策略 $before -> $after(2=不弹输入法)")
+        }.onFailure {
+            Log.w(TAG, "设不了副屏输入法策略,副屏上的输入框可能会把机主的键盘顶出来", it)
         }
     }
 

@@ -49,7 +49,7 @@ object Privileged {
             .debuggable(false)
             // AIDL 一改就要升版本号,否则 Shizuku 会复用旧的 user service 进程 ——
             // 那个进程里没有新方法,调用会直接抛。
-            .version(2)
+            .version(3)
 
         Shizuku.bindUserService(args, object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
