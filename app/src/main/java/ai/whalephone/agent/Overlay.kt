@@ -1,5 +1,6 @@
 package ai.whalephone.agent
 
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -424,14 +425,23 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
 // ---------------------------------------------------------------------------
 
 /**
- * 悬浮球。不打开 app 也能下任务。
+ * 悬浮球。
  *
- * 收起状态是一个小圆球,点开是一条输入栏:麦克风 + 文本框 + 发送。
- * 语音走 Voice(系统识别器,进程内,不拉起任何界面)—— 用 RecognizerIntent 的话
- * 会起一个全屏 Activity,那是一次真正的界面打断,和这个 app 的立场相反。
+ * 收起时是一颗可拖的球。点开**默认进语音**,不是进打字 —— 机主开这颗球的理由就是
+ * 「不想打开 app,说一句话就走」,而弹键盘本身就是一次打断:窗口得获焦、输入法要
+ * 重挂目标、他底下那个 App 的焦点被拿走。所以展开分成两态:
  *
- * 球本身永远不获焦。只有点开输入栏、机主要打字的那一刻才临时可获焦(否则
- * 输入法根本不会为它弹出来),收起时立刻还回去。
+ *   语音态(点球默认进这个):窗口保持 FLAG_NOT_FOCUSABLE,整条路不碰焦点、不碰
+ *     输入法,就在球原来那个高度就地展开,立刻开始听,识别到的字实时显示。
+ *   键盘态:机主自己点「键盘」才进。这一刻才摘掉 NOT_FOCUSABLE、显式叫输入法,
+ *     并把面板贴到屏幕下沿给键盘让位置;退出时立刻还回去。
+ *
+ * 原来这两态是一态:点球直接进键盘态,于是面板从球那儿跳到屏幕底部、键盘弹出来、
+ * 焦点被拿走,三件事一起发生,看着像点错了 —— 而这三件事恰恰是这个 app 的立场里
+ * 最该避免的。语音是主路径,键盘是备选,现在按这个分。
+ *
+ * 识别完不自动派任务:识别错一个字,这里的代价是「它真的去你手机上操作了」。
+ * 所以最后一步留给机主点一下「发送」。
  */
 class Ball(
     ctx: Context,
@@ -440,27 +450,51 @@ class Ball(
     private val micMode: (Boolean) -> Unit,
 ) : FloatWindow(ctx, wm) {
 
+    private enum class Mode { REST, VOICE, TYPE }
+
     private lateinit var bubble: TextView
     private lateinit var panel: LinearLayout
-    private lateinit var input: EditText
-    private lateinit var mic: TextView
+    private lateinit var voiceBox: LinearLayout
+    private lateinit var typeBar: LinearLayout
+    private lateinit var micBtn: TextView
+    private lateinit var heard: TextView
     private lateinit var state: TextView
+    private lateinit var sendBtn: TextView
+    private lateinit var input: EditText
+
+    private var mode = Mode.REST
     private var voice: Voice? = null
-    private var open = false
+    private var pulse: ValueAnimator? = null
+    /** 识别器报过音量没有。报了就用真实音量驱动麦克风的大小,没报才退回自己呼吸 */
+    private var gotLevel = false
     private var restX = 0
     private var restY = 0
 
-    /** 收起状态下的窗口标志:不获焦、可拖到状态栏底下 */
+    private val ui = Handler(Looper.getMainLooper())
+    /** 语音这条路走到头(没听清 / 没权限)之后自己收起来 —— 一直摊在机主屏幕上是打扰 */
+    private val autoRest = Runnable { if (mode == Mode.VOICE) toRest() }
+    private val restSoon = Runnable { toRest() }
+
+    /** 收起状态:不获焦、可拖到状态栏底下 */
     private val restFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
         WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
 
     /**
-     * 展开状态:要获焦(不然输入法不会为它弹出来),但必须**不吃掉别处的触摸** ——
-     * 可获焦的窗口默认是 touch-modal,而这条面板横贯屏宽,不加 NOT_TOUCH_MODAL 的话
-     * 机主点屏幕上任何地方都会被它接住。WATCH_OUTSIDE_TOUCH 是为了点外面能收起。
+     * 语音态:**仍然不获焦**。机主底下那个 App 该是焦点还是焦点,他打了一半的字也还在。
+     * WATCH_OUTSIDE_TOUCH 只是为了「点别处收起来」—— 不获焦的窗口本来就不吃别处的触摸,
+     * 那一下照样送到底下的 App。
      */
-    private val openFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+    private val voiceFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+
+    /**
+     * 键盘态:要获焦(不然输入法不会为它弹出来),但必须**不吃掉别处的触摸** ——
+     * 可获焦的窗口默认是 touch-modal,而这条面板横贯屏宽,不加 NOT_TOUCH_MODAL 的话
+     * 机主点屏幕上任何地方都会被它接住。
+     */
+    private val typeFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
         WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
         WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
 
@@ -474,7 +508,7 @@ class Ball(
             background = Ui.round(pal.accent, Ui.dp(ctx, 26f))
             elevation = Ui.dp(ctx, 6f).toFloat()
         }
-        draggable(bubble, onTap = { toggle() }, onDrop = { snap() })
+        draggable(bubble, onTap = { toVoice() }, onDrop = { snap() })
 
         panel = buildPanel()
         panel.visibility = View.GONE
@@ -486,33 +520,187 @@ class Ball(
     }
 
     /**
-     * 展开时窗口可获焦,于是它会收到返回键 —— 机主按返回的第一意图是「关掉这个面板」,
+     * 键盘态下窗口可获焦,于是它会收到返回键 —— 机主按返回的第一意图是「关掉这个面板」,
      * 不是退出他底下那个 App。不接这一下的话返回会穿过去,把他正在看的东西退掉。
-     * 面板外面的点击(ACTION_OUTSIDE)同样收起。
+     * 两态下点面板外面(ACTION_OUTSIDE)都收起。
      */
     private inner class Root(c: Context) : LinearLayout(c) {
         init { orientation = VERTICAL }
         override fun dispatchKeyEvent(e: android.view.KeyEvent): Boolean {
-            if (open && e.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
-                e.action == android.view.KeyEvent.ACTION_UP) { toggle(); return true }
+            if (mode == Mode.TYPE && e.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                e.action == android.view.KeyEvent.ACTION_UP) { toRest(); return true }
             return super.dispatchKeyEvent(e)
         }
         override fun onTouchEvent(e: MotionEvent): Boolean {
-            if (open && e.actionMasked == MotionEvent.ACTION_OUTSIDE) { toggle(); return true }
+            if (mode != Mode.REST && e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                toRest(); return true
+            }
             return super.onTouchEvent(e)
         }
     }
 
     private fun buildPanel(): LinearLayout {
-        val r = Ui.dp(ctx, 24f)
-        state = Ui.text(ctx, "", 11f, pal.textSub).apply {
-            setPadding(Ui.dp(ctx, 16f), 0, Ui.dp(ctx, 16f), Ui.dp(ctx, 6f))
-            visibility = View.GONE
+        voiceBox = buildVoiceBox()
+        typeBar = buildTypeBar()
+        return Ui.col(ctx).apply {
+            background = Ui.round(pal.surface, Ui.dp(ctx, 24f), pal.line, Ui.dp(ctx, 1f))
+            elevation = Ui.dp(ctx, 10f).toFloat()
+            addView(voiceBox, Ui.lp(Ui.MATCH, Ui.WRAP))
+            addView(typeBar, Ui.lp(Ui.MATCH, Ui.WRAP))
         }
-        mic = Ui.text(ctx, MIC, 17f, pal.accent).apply {
+    }
+
+    // ---- 语音态 ------------------------------------------------------------
+
+    private fun buildVoiceBox(): LinearLayout {
+        micBtn = Ui.text(ctx, MIC, 21f, pal.accent).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 27f)), pal.ripple)
+            setOnClickListener {
+                ui.removeCallbacks(autoRest)
+                if (voice != null) { stopVoice(); say("停了,点麦克风重说") } else startVoice()
+            }
+        }
+        state = Ui.text(ctx, "", 11f, pal.textSub)
+        heard = Ui.text(ctx, "", 16f, pal.textMain).apply { setLineSpacing(0f, 1.1f) }
+        val close = Ui.text(ctx, "✕", 14f, pal.textSub).apply {
+            gravity = Gravity.CENTER
+            background = Ui.tappable(Ui.round(Color.TRANSPARENT, Ui.dp(ctx, 18f)), pal.ripple)
+            setOnClickListener { toRest() }
+        }
+
+        val words = Ui.col(ctx).apply {
+            addView(state, Ui.lp(Ui.MATCH, Ui.WRAP))
+            addView(heard, Ui.lp(Ui.MATCH, Ui.WRAP).apply { topMargin = Ui.dp(ctx, 2f) })
+        }
+        val top = Ui.row(ctx).apply {
+            addView(micBtn, Ui.lp(Ui.dp(ctx, 54f), Ui.dp(ctx, 54f)))
+            addView(words, Ui.lp(0, Ui.WRAP, 1f).apply {
+                marginStart = Ui.dp(ctx, 12f); marginEnd = Ui.dp(ctx, 8f)
+            })
+            addView(close, Ui.lp(Ui.dp(ctx, 34f), Ui.dp(ctx, 34f)))
+        }
+
+        val keyboard = pill("键盘", accent = false) { toType(heard.text.toString()) }
+        sendBtn = pill("发送", accent = true) { send(heard.text.toString()) }
+        sendBtn.visibility = View.GONE
+        val acts = Ui.row(ctx).apply {
+            addView(keyboard, Ui.lp(Ui.WRAP, Ui.dp(ctx, 34f)))
+            addView(View(ctx), Ui.lp(0, 1, 1f))
+            addView(sendBtn, Ui.lp(Ui.WRAP, Ui.dp(ctx, 34f)))
+        }
+
+        return Ui.col(ctx).apply {
+            val p = Ui.dp(ctx, 12f)
+            setPadding(p, p, p, p)
+            addView(top, Ui.lp(Ui.MATCH, Ui.WRAP))
+            addView(acts, Ui.lp(Ui.MATCH, Ui.WRAP).apply { topMargin = Ui.dp(ctx, 10f) })
+        }
+    }
+
+    private fun pill(t: String, accent: Boolean, onClick: () -> Unit) =
+        Ui.text(ctx, t, 13f, if (accent) pal.onAccent else pal.textSub).apply {
+            gravity = Gravity.CENTER
+            val bg = if (accent) pal.accent else pal.surfaceAlt
+            background = Ui.tappable(Ui.round(bg, Ui.dp(ctx, 17f)), pal.ripple)
+            setPadding(Ui.dp(ctx, 18f), 0, Ui.dp(ctx, 18f), 0)
+            setOnClickListener { ui.removeCallbacks(autoRest); onClick() }
+        }
+
+    private fun toVoice() {
+        val (sw, sh) = screenSize()
+        mode = Mode.VOICE
+        ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
+        bubble.visibility = View.GONE
+        panel.visibility = View.VISIBLE
+        voiceBox.visibility = View.VISIBLE
+        typeBar.visibility = View.GONE
+        heard.text = ""
+        sendBtn.visibility = View.GONE
+        lp.flags = voiceFlags
+        lp.width = sw - Ui.dp(ctx, 20f)
+        lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.x = Ui.dp(ctx, 10f)
+        // 就地展开:面板出现在球原来那个高度上,不跳到屏幕别处去
+        lp.y = min(max(restY - Ui.dp(ctx, 8f), Ui.dp(ctx, 48f)), sh - Ui.dp(ctx, 200f))
+        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        apply()
+        startVoice()
+    }
+
+    private fun startVoice() {
+        if (voice != null) return
+        heard.text = ""
+        sendBtn.visibility = View.GONE
+        if (!Voice.available(ctx)) { say("这台机器上没有语音识别,点「键盘」打字"); armRest(); return }
+        if (!Voice.micGranted(ctx)) { say("还没给录音权限 —— 打开 app,设置里给一次"); armRest(); return }
+        micMode(true)
+        listening(true)
+        say("在听…")
+        voice = Voice(
+            ctx,
+            onPartial = { t -> heard.text = t },
+            onFinal = { t ->
+                stopVoice()
+                if (t.isBlank()) { say("没听清,点麦克风再说一次"); armRest() }
+                else { heard.text = t; say("要它做这个吗?"); sendBtn.visibility = View.VISIBLE }
+            },
+            onError = { msg -> stopVoice(); say(msg); armRest() },
+            onLevel = { rms -> level(rms) },
+        ).also { it.start() }
+    }
+
+    private fun stopVoice() {
+        val had = voice != null
+        voice?.stop(); voice = null
+        listening(false)
+        if (had) micMode(false)
+    }
+
+    /** 在听的时候麦克风要看得出来在动 —— 否则机主不知道它到底听没听见 */
+    private fun listening(on: Boolean) {
+        pulse?.cancel(); pulse = null
+        micBtn.scaleX = 1f; micBtn.scaleY = 1f
+        if (!on) {
+            gotLevel = false
+            micBtn.setTextColor(pal.accent)
+            micBtn.background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 27f)), pal.ripple)
+            return
+        }
+        micBtn.setTextColor(pal.onAccent)
+        micBtn.background = Ui.tappable(Ui.round(pal.bad, Ui.dp(ctx, 27f)), pal.ripple)
+        // 识别器不一定报音量。报之前先自己呼吸,报了就交给真实音量(见 level)
+        pulse = ValueAnimator.ofFloat(1f, 1.12f).apply {
+            duration = 700
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            addUpdateListener { a ->
+                val f = a.animatedValue as Float
+                micBtn.scaleX = f; micBtn.scaleY = f
+            }
+            start()
+        }
+    }
+
+    /** onRmsChanged 的量纲是 dB,各家实现不一,这里只当作「有多大声」压进一个小范围 */
+    private fun level(rms: Float) {
+        if (!gotLevel) { gotLevel = true; pulse?.cancel(); pulse = null }
+        val f = 1f + (rms.coerceIn(0f, 10f) / 10f) * 0.3f
+        micBtn.scaleX = f; micBtn.scaleY = f
+    }
+
+    private fun say(s: String) { state.text = s }
+
+    private fun armRest() = ui.postDelayed(autoRest, 6_000)
+
+    // ---- 键盘态 ------------------------------------------------------------
+
+    private fun buildTypeBar(): LinearLayout {
+        val back = Ui.text(ctx, MIC, 17f, pal.accent).apply {
             gravity = Gravity.CENTER
             background = Ui.tappable(Ui.round(pal.surfaceAlt, Ui.dp(ctx, 19f)), pal.ripple)
-            setOnClickListener { toggleVoice() }
+            setOnClickListener { toVoice() }
         }
         input = EditText(ctx).apply {
             hint = "说一句你要它做什么"
@@ -522,73 +710,77 @@ class Ball(
             setSingleLine()
             background = null
             imeOptions = EditorInfo.IME_ACTION_SEND
-            setOnEditorActionListener { _, _, _ -> send(); true }
+            setOnEditorActionListener { _, _, _ -> send(text.toString()); true }
         }
         val go = Ui.text(ctx, SEND, 16f, pal.onAccent).apply {
             gravity = Gravity.CENTER
             background = Ui.tappable(Ui.round(pal.accent, Ui.dp(ctx, 19f)), pal.ripple)
-            setOnClickListener { send() }
+            setOnClickListener { send(input.text.toString()) }
         }
-        val bar = Ui.row(ctx).apply {
+        return Ui.row(ctx).apply {
+            visibility = View.GONE
             setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 7f), Ui.dp(ctx, 10f), Ui.dp(ctx, 7f))
-            addView(mic, Ui.lp(Ui.dp(ctx, 38f), Ui.dp(ctx, 38f)))
+            addView(back, Ui.lp(Ui.dp(ctx, 38f), Ui.dp(ctx, 38f)))
             addView(input, Ui.lp(0, Ui.WRAP, 1f).apply {
                 marginStart = Ui.dp(ctx, 10f); marginEnd = Ui.dp(ctx, 10f)
             })
             addView(go, Ui.lp(Ui.dp(ctx, 38f), Ui.dp(ctx, 38f)))
         }
-        return Ui.col(ctx).apply {
-            background = Ui.round(pal.surface, r, pal.line, Ui.dp(ctx, 1f))
-            elevation = Ui.dp(ctx, 10f).toFloat()
-            addView(bar, Ui.lp(Ui.MATCH, Ui.WRAP))
-            addView(state, Ui.lp(Ui.MATCH, Ui.WRAP))
-        }
     }
 
     /**
-     * 展开 / 收起。
-     *
-     * 展开时球本身藏起来,只剩一条贴在屏幕下沿的输入栏。原来是「面板挂在球上方」,
-     * 结果球会从右边跳到屏幕中间给面板让位置,看着像出了 bug。贴下沿还顺带解决了
-     * 另一件事:输入法弹出来时面板正好被顶在键盘上面,不用自己去算键盘高度。
-     *
-     * 展开这一下会把主屏的焦点从机主的 App 拿过来 —— 这是整个 app 里唯一一处主动抢焦点,
-     * 前提是机主自己点的球,而且收起时立刻还回去。
+     * 进打字。这是整个 app 里唯一一处主动拿主屏焦点的地方,前提是机主自己点的「键盘」,
+     * 而且一退出立刻还回去。面板贴屏幕下沿,输入法弹出来时正好把它顶在键盘上面,
+     * 不用自己算键盘高度。
      */
-    private fun toggle() {
-        open = !open
+    private fun toType(prefill: String) {
         val (sw, _) = screenSize()
-        if (open) {
-            panel.visibility = View.VISIBLE
-            bubble.visibility = View.GONE
-            lp.flags = openFlags
-            lp.width = sw - Ui.dp(ctx, 20f)
-            lp.height = WindowManager.LayoutParams.WRAP_CONTENT
-            lp.gravity = Gravity.BOTTOM or Gravity.START
-            lp.x = Ui.dp(ctx, 10f)
-            lp.y = Ui.dp(ctx, 12f)
-            // 不写这一句,输入法认为这个窗口不需要它:面板出来了键盘不弹(真机上量到过)
-            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
-            apply()
-            input.requestFocus()
-            // ADJUST_RESIZE 只是允许弹,真正把它叫起来还得显式要一次
-            input.post { ime()?.showSoftInput(input, 0) }
-        } else {
-            stopVoice()
-            input.setText("")
-            state.visibility = View.GONE
-            runCatching { ime()?.hideSoftInputFromWindow(input.windowToken, 0) }
-            panel.visibility = View.GONE
-            bubble.visibility = View.VISIBLE
-            lp.flags = restFlags
-            lp.width = WindowManager.LayoutParams.WRAP_CONTENT
-            lp.height = WindowManager.LayoutParams.WRAP_CONTENT
-            lp.gravity = Gravity.TOP or Gravity.START
-            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
-            lp.x = restX; lp.y = restY
-            apply()
-        }
+        stopVoice()
+        mode = Mode.TYPE
+        ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
+        bubble.visibility = View.GONE
+        panel.visibility = View.VISIBLE
+        voiceBox.visibility = View.GONE
+        typeBar.visibility = View.VISIBLE
+        lp.flags = typeFlags
+        lp.width = sw - Ui.dp(ctx, 20f)
+        lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+        lp.gravity = Gravity.BOTTOM or Gravity.START
+        lp.x = Ui.dp(ctx, 10f)
+        lp.y = Ui.dp(ctx, 12f)
+        // 不写这一句,输入法认为这个窗口不需要它:面板出来了键盘不弹(真机上量到过)
+        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+        apply()
+        input.setText(prefill)
+        input.setSelection(input.text.length)
+        input.requestFocus()
+        // ADJUST_RESIZE 只是允许弹,真正把它叫起来还得显式要一次
+        input.post { ime()?.showSoftInput(input, 0) }
+    }
+
+    // ---- 收起 --------------------------------------------------------------
+
+    private fun toRest() {
+        mode = Mode.REST
+        ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
+        stopVoice()
+        input.setText("")
+        heard.text = ""
+        say("")
+        sendBtn.visibility = View.GONE
+        runCatching { ime()?.hideSoftInputFromWindow(input.windowToken, 0) }
+        panel.visibility = View.GONE
+        voiceBox.visibility = View.GONE
+        typeBar.visibility = View.GONE
+        bubble.visibility = View.VISIBLE
+        lp.flags = restFlags
+        lp.width = WindowManager.LayoutParams.WRAP_CONTENT
+        lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        lp.x = restX; lp.y = restY
+        apply()
     }
 
     private fun ime() =
@@ -596,7 +788,7 @@ class Ball(
 
     /** 松手后贴到最近的一边。悬浮球飘在屏幕中间会挡东西。 */
     private fun snap() {
-        if (open) return
+        if (mode != Mode.REST) return
         val (sw, sh) = screenSize()
         lp.x = if (lp.x + Ui.dp(ctx, 26f) < sw / 2) Ui.dp(ctx, 6f) else sw - Ui.dp(ctx, 58f)
         lp.y = max(Ui.dp(ctx, 40f), min(lp.y, sh - Ui.dp(ctx, 120f)))
@@ -604,54 +796,29 @@ class Ball(
         apply()
     }
 
-    private fun send() {
-        val g = input.text.toString().trim()
-        if (g.isBlank()) { flash("先说要做什么"); return }
+    private fun send(g0: String) {
+        val g = g0.trim()
+        if (g.isBlank()) { say("先说要做什么"); return }
         if (Config.get(ctx, Config.KEY_API_KEY).isBlank()) {
-            flash("还没配模型密钥,先打开 app 设置一次"); return
+            say("还没配模型密钥,先打开 app 设置一次"); return
         }
+        stopVoice()
         AgentService.start(ctx, g)
+        heard.text = g
+        say("已经派下去了,进度看通知")
+        sendBtn.visibility = View.GONE
         input.setText("")
-        flash("已经派下去了,进度看通知")
-        Handler(Looper.getMainLooper()).postDelayed({ if (open) toggle() }, 900)
-    }
-
-    private fun flash(s: String) {
-        state.text = s
-        state.visibility = View.VISIBLE
-    }
-
-    private fun toggleVoice() {
-        if (voice != null) { stopVoice(); return }
-        if (!Voice.available(ctx)) { flash("这台机器上没有可用的语音识别"); return }
-        if (!Voice.micGranted(ctx)) { flash("还没给录音权限 —— 打开 app,设置里给一次"); return }
-        micMode(true)
-        mic.setTextColor(pal.bad)
-        flash("在听…")
-        voice = Voice(ctx,
-            onPartial = { t -> input.setText(t); input.setSelection(input.text.length) },
-            onFinal = { t ->
-                stopVoice()
-                if (t.isBlank()) flash("没听清,再说一次") else { input.setText(t); send() }
-            },
-            onError = { msg -> stopVoice(); flash(msg) },
-        ).also { it.start() }
-    }
-
-    private fun stopVoice() {
-        val had = voice != null
-        voice?.stop(); voice = null
-        mic.setTextColor(pal.accent)
-        if (had) micMode(false)
+        ui.postDelayed(restSoon, 900)
     }
 
     override fun hide() {
+        ui.removeCallbacks(autoRest); ui.removeCallbacks(restSoon)
         stopVoice()
         super.hide()
     }
 
     private companion object {
-        const val MIC = "\uD83C\uDFA4"
-        const val SEND = "\u27A4"
+        const val MIC = "🎤"
+        const val SEND = "➤"
     }
 }

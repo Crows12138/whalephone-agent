@@ -27,6 +27,8 @@ class Voice(
     private val onPartial: (String) -> Unit,
     private val onFinal: (String) -> Unit,
     private val onError: (String) -> Unit,
+    /** 麦克风电平(dB)。给界面画「它真的在听」用,识别器不一定报 —— 不报就一次都不回调 */
+    private val onLevel: (Float) -> Unit = {},
 ) {
 
     private var sr: SpeechRecognizer? = null
@@ -40,7 +42,7 @@ class Voice(
         r.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
             override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(v: Float) {}
+            override fun onRmsChanged(v: Float) { onLevel(v) }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onEvent(t: Int, p: Bundle?) {}
