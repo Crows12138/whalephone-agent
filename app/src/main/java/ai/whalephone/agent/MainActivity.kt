@@ -4,8 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
-import android.provider.Settings
 import android.text.InputType
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var scroller: ScrollView
     private lateinit var goal: EditText
     private lateinit var shizukuBtn: Button
+    private lateinit var manualA11y: TextView
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -63,16 +64,19 @@ class MainActivity : Activity() {
             setOnClickListener { onShizuku() }
         }
         root.addView(shizukuBtn)
-        root.addView(Button(this).apply {
-            text = "打开无障碍设置"
-            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        })
-        // 这个 Intent 只到得了无障碍首页,而本 app 的服务在二级页里,机主找不到。
-        // 想直接跳到那一项要用 ACTION_ACCESSIBILITY_DETAILS_SETTINGS —— 它需要
-        // OPEN_ACCESSIBILITY_DETAILS_SETTINGS,实测这台机器上是 signature|installer,
-        // 普通 app 拿不到。二级页本身在这台 ROM 上也没有独立 Activity(是首页里的
-        // 一个 fragment),深链只能靠 ROM 私有参数,换台机器就断。所以老老实实写路径。
-        root.addView(label("手动开的话:设置 → 辅助功能 → 已安装的应用程序 → WhalePhone Agent"))
+        // 没有「打开无障碍设置」按钮。
+        //
+        // 它能到的只是无障碍首页,而本 app 的服务在二级页里(One UI 是
+        // 设置 → 辅助功能 → 已安装的应用程序),机主点进去找不到,反而更迷惑。
+        // 想直接跳到那一项要用 ACTION_ACCESSIBILITY_DETAILS_SETTINGS —— 实测这台
+        // 机器上它需要 OPEN_ACCESSIBILITY_DETAILS_SETTINGS,protectionLevel 是
+        // signature|installer,普通 app 拿不到;二级页本身在这台 ROM 上也没有独立
+        // Activity(是首页里的一个 fragment),深链只能靠 ROM 私有参数,换台机器就断。
+        //
+        // 而且正常情况下机主根本不需要碰它:A11yGate 开工时自己开、收工自己关。
+        // 所以只在**真的自动开不了**的时候,把路径作为一行提示显示出来。
+        manualA11y = label("手动开:设置 → 辅助功能 → 已安装的应用程序 → WhalePhone Agent")
+        root.addView(manualA11y)
 
         root.addView(label("LLM 接口(OpenAI 兼容)"))
         val base = field(Config.KEY_BASE_URL, "https://api.deepseek.com/v1", "https://api.deepseek.com/v1")
@@ -213,6 +217,8 @@ class MainActivity : Activity() {
             if (!alive) appendLine("Shizuku 每次重启手机都要重开一次:点下面那个按钮进去,用「通过无线调试启动」")
         }
         shizukuBtn.text = if (alive) "授权 Shizuku" else "打开 Shizuku 去启动它"
+        // 自动开得了就不提这茬 —— 机主没有任何要处理的事,多一行只会让他去找哪里坏了
+        manualA11y.visibility = if (a11y || autoA11y) View.GONE else View.VISIBLE
         if (alive && granted && !Privileged.ready) {
             thread { Privileged.connect(this); runOnUiThread { refresh() } }
         }
