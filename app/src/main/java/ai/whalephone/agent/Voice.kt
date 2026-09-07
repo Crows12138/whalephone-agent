@@ -23,9 +23,12 @@ import android.util.Log
  * 中文识别明显不如国内引擎;而装着的讯飞输入法**没有注册 RecognitionService**,
  * 标准 API 拿不到它。
  *
- * 所以引擎不由代码定死:[engines] 把设备上注册过的都列出来,机主在设置里选,
- * 留空就是系统默认(也就是今天的行为)。这不是「让用户去解决」—— 是把一个我们
- * 确实决定不了、而不同机器上答案不同的变量,交给唯一能试出答案的人。
+ * 一度在设置里做过引擎选择器,删掉了:**它是系统那个设置的劣质副本**。Android
+ * 本来就有「默认语音识别服务」,系统那条路走 SpeechRecognitionManagerService;
+ * 而 app 自己 createSpeechRecognizer(ctx, component) 是直接绑服务 —— 实测显式选中
+ * 反而硬失败(agsa_transcription_GRPC_ERROR),系统默认至少还会退到端上模型。
+ * 同一件事做得比系统自带的更差,还多一份可能不一致的状态,那就不该存在。
+ * 设置页现在只放一个入口,指向系统那个设置。
  *
  * 换一台没有任何识别服务的机器,[available] 会是 false,悬浮球那边直接说清楚,
  * 而不是点了没反应。
@@ -44,7 +47,7 @@ class Voice(
     fun start() {
         // SpeechRecognizer 必须在有 Looper 的线程上创建和调用,而且只能是同一个线程。
         // 这里的调用方全在主线程(悬浮球的点击回调),不额外切。
-        val r = runCatching { create() }.getOrNull()
+        val r = runCatching { SpeechRecognizer.createSpeechRecognizer(ctx) }.getOrNull()
         if (r == null) { onError("语音识别起不来"); return }
         sr = r
         r.setRecognitionListener(object : RecognitionListener {
@@ -65,14 +68,6 @@ class Voice(
 
             override fun onError(code: Int) {
                 // 把错误码翻成机主看得懂的话。原样报 "ERROR_7" 等于没报。
-                //
-                // 选过引擎的时候还要多说一句该去哪儿改。实测这台机器上显式选中
-                // Google 的引擎会硬失败(agsa_transcription_GRPC_ERROR ——
-                // 它要连 Google 的服务器,而这台机器连不上),而系统默认那条路
-                // 会退到端上模型,于是「不准」而不是「失败」。两种表现差别很大,
-                // 机主却看不出自己踩的是哪一种,除非这里点破。
-                val picked = Config.get(ctx, Config.KEY_VOICE_ENGINE).isNotBlank()
-                val hint = if (picked) "。这是你在设置里选的引擎,不行就换回「系统默认」" else ""
                 onError(
                     when (code) {
                         SpeechRecognizer.ERROR_NO_MATCH,
@@ -82,7 +77,7 @@ class Voice(
                         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "识别服务连不上网"
                         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙,稍等一下"
                         else -> "识别失败($code)"
-                    } + hint
+                    }
                 )
             }
         })
@@ -93,22 +88,6 @@ class Voice(
             .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
         runCatching { r.startListening(i) }
             .onFailure { Log.w(TAG, "startListening 失败", it); onError("语音识别起不来") }
-    }
-
-    /**
-     * 机主选过引擎就用他选的,没选、或者选的那个已经用不了了,就回落到系统默认。
-     *
-     * 回落这一步是必要的:引擎可能被卸载、被停用,也可能是从一个还会列出不可用
-     * 引擎的旧版本里选的。不回落的话表现是「点一下就识别失败」,而机主没有任何
-     * 线索知道该去改哪里。
-     */
-    private fun create(): SpeechRecognizer {
-        val want = Config.get(ctx, Config.KEY_VOICE_ENGINE).takeIf { it.isNotBlank() }
-        val ok = want != null && engines(ctx).any { it.first.flattenToString() == want }
-        if (want != null && !ok) Log.w(TAG, "选的引擎现在用不了,回落到系统默认:$want")
-        val cn = want?.takeIf { ok }?.let { android.content.ComponentName.unflattenFromString(it) }
-        return if (cn != null) SpeechRecognizer.createSpeechRecognizer(ctx, cn)
-        else SpeechRecognizer.createSpeechRecognizer(ctx)
     }
 
     fun stop() {
@@ -128,26 +107,6 @@ class Voice(
         fun available(ctx: Context) =
             runCatching { SpeechRecognizer.isRecognitionAvailable(ctx) }.getOrDefault(false)
 
-        /**
-         * 这台设备上**本 app 真的能用**的识别引擎,附上人看得懂的名字。
-         *
-         * 一台机器上通常不止一个,而它们的中文准确率差别很大 —— 差到值得让机主
-         * 挨个试。但列表必须先过一道筛:声明了绑定权限的服务只有系统能连,普通
-         * app 绑不上。实测这台机器上 Claude 那个就声明了 BIND_RECOGNITION_SERVICE,
-         * 列出来点一下只会立刻「识别失败」,而机主完全看不出为什么 ——
-         * **一个点不动的选项比没有这个选项更糟**。
-         */
-        fun engines(ctx: Context): List<Pair<android.content.ComponentName, String>> =
-            runCatching {
-                val pm = ctx.packageManager
-                pm.queryIntentServices(Intent(android.speech.RecognitionService.SERVICE_INTERFACE), 0)
-                    .filter { it.serviceInfo.permission.isNullOrBlank() }
-                    .map { ri ->
-                        val si = ri.serviceInfo
-                        android.content.ComponentName(si.packageName, si.name) to
-                            si.applicationInfo.loadLabel(pm).toString()
-                    }
-            }.getOrDefault(emptyList())
 
         fun micGranted(ctx: Context) =
             ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==

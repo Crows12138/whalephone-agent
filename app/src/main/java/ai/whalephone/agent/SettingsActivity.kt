@@ -91,17 +91,13 @@ class SettingsActivity : Activity() {
             permLine,
         ))
 
-        section(col, "语音识别引擎")
-        val engineLine = note("")
+        section(col, "语音识别")
         col.addView(card(
-            actionRow("换一个引擎试试") { pickEngine() },
-            engineLine,
-            note("识别准不准由设备上装的引擎决定,不由这个 app 的参数决定 —— " +
-                "同一句话在不同引擎上差别很大,值得挨个试一遍。留「系统默认」就是不干预。\n" +
-                "只列本 app 能连的:有些引擎(比如某些 app 自带的)声明了只有系统能绑定," +
-                "列出来也点不动,所以不列。"),
+            actionRow("打开系统的语音输入设置") { openVoiceSettings() },
+            note("识别准不准、能不能用,都由设备上装的引擎决定,不由这个 app 的参数决定。" +
+                "换引擎要在系统设置里换 —— app 自己绕过去直接绑服务反而更糟(实测硬失败)," +
+                "所以这里只给一个入口,不做第二份设置。"),
         ))
-        this.engineNote = engineLine
         this.permNote = permLine
 
         section(col, "演示")
@@ -120,33 +116,12 @@ class SettingsActivity : Activity() {
     }
 
     private var permNote: TextView? = null
-    private var engineNote: TextView? = null
 
-    /** 列出设备上注册过的识别引擎让机主选。第一项永远是「系统默认」 */
-    private fun pickEngine() {
-        val list = Voice.engines(this)
-        if (list.isEmpty()) { toast("这台设备上没有语音识别引擎"); return }
-        val names = arrayOf("系统默认") + list.map { "${it.second}\n${it.first.packageName}" }
-        val values = arrayOf("") + list.map { it.first.flattenToString() }
-        val now = Config.get(this, Config.KEY_VOICE_ENGINE)
-        android.app.AlertDialog.Builder(this)
-            .setTitle("语音识别引擎")
-            .setSingleChoiceItems(names, values.indexOf(now).coerceAtLeast(0)) { d, i ->
-                Config.set(this, Config.KEY_VOICE_ENGINE, values[i])
-                d.dismiss()
-                renderEngine()
-                toast("下次点悬浮球就用它了")
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun renderEngine() {
-        val now = Config.get(this, Config.KEY_VOICE_ENGINE)
-        engineNote?.text = "现在用的:" + if (now.isBlank()) "系统默认"
-        else Voice.engines(this).firstOrNull { it.first.flattenToString() == now }
-            ?.let { "${it.second}(${it.first.packageName})" }
-            ?: "这个引擎现在用不了(卸载了,或者只有系统能连),已经回落到系统默认"
+    /** 系统自带的「语音输入」设置。不是每台机器都有这一页,没有就说清楚 */
+    private fun openVoiceSettings() {
+        val i = android.content.Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+        if (i.resolveActivity(packageManager) != null) startActivity(i)
+        else toast("这台机器没有这一页,到「设置 - 通用管理 - 语音输入」里找")
     }
 
     override fun onResume() {
@@ -156,7 +131,6 @@ class SettingsActivity : Activity() {
             append("\n录音权限:").append(if (Voice.micGranted(this@SettingsActivity)) "已给" else "还没给")
             append("\n语音识别:").append(if (Voice.available(this@SettingsActivity)) "这台机器上可用" else "这台机器上没有")
         }
-        renderEngine()
     }
 
     /**
