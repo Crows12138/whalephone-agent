@@ -73,8 +73,17 @@ class Voice(
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听清,再说一次"
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有录音权限"
+                        // 「连不上网」这句话容易被读成「你手机没网」。真实情况是识别
+                        // 引擎连不上**它自己的后端** —— 本 app 连模型接口一直是好的。
+                        // 实测这台机器上就是这样(见 FINDINGS),不点破的话机主会去
+                        // 查自己的网络,查不出任何问题。
                         SpeechRecognizer.ERROR_NETWORK,
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "识别服务连不上网"
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "识别引擎连不上它的服务器(不是你没网)"
+                        // 离线包没装。这条和上一条常常是一对:在线走不通、离线又没有
+                        // 语言包,而语言包本身也要联网下载。
+                        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+                        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+                            "这台手机没装中文的离线识别包"
                         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙,稍等一下"
                         else -> "识别失败($code)"
                     }

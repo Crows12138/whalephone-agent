@@ -1998,6 +1998,48 @@ gRPC 14 = UNAVAILABLE。和前面量到的 `www.google.com:443 不通` 完全对
 绕法是现成的:悬浮球点「键盘」→ 讯飞弹出来 → 用讯飞自己的语音按钮说 →
 字进我们的输入框。代价是那一刻浮窗要拿一次焦点。
 
+## 「之前不是行的吗」:两条路都堵死,而它在两条路之间碰运气
+
+机主后来反馈「之前是行的,现在又不行了」。先自证清白:把 Voice.kt 从动手之前
+(`dccce97`)diff 到现在,**排除注释后一个字都没变**。变的不是代码。
+
+再看日志,这次的报错和之前那次不一样:
+
+```
+Speech recognition error type ONLINE_NO_PROGRESS with error code -1
+agsa_transcription_GRPC_ERROR code 1
+```
+
+`ONLINE_NO_PROGRESS` —— 在线那条路没有进展。也就是说识别器**默认优先走在线**,
+连不上就在那儿等到超时;而它偶尔也会退到端上模型给出一段(不准的)文字。
+走哪条它自己定,不通知任何人。机主体验到的「有时有字、有时报连不上网」,
+就是这个不确定性。
+
+那就明确要求它走端上(`EXTRA_PREFER_OFFLINE`),把碰运气变成确定:
+
+```
+SodaSpeechRecognizer: Offline recognizer - start listening
+agsa_transcription_LANGUAGE_PACK_ERROR code 12
+Speech recognition error type LANGUAGE_PACK_ERROR with error code 12
+```
+
+**端上这条也堵死了 —— 这台手机没装中文离线识别包。** 而下载那个语言包,
+要连 Google。
+
+至此这台机器上的语音识别是**闭环的死路**:
+
+```
+在线 → Google 连不上           ONLINE_NO_PROGRESS
+离线 → 没有中文语言包           LANGUAGE_PACK_ERROR
+补语言包 → 要连 Google         回到第一条
+```
+
+`EXTRA_PREFER_OFFLINE` 那行撤掉了 —— 在 Google 可达的机器上强制离线只会更差,
+而它在这台机器上也救不了任何东西。留下的是两条更准的错误提示:
+「识别引擎连不上它的服务器(不是你没网)」和「这台手机没装中文的离线识别包」。
+第一条尤其重要:原来那句「识别服务连不上网」会被读成「你手机没网」,而这个
+app 连模型接口一直是好的 —— 机主会去查自己的网络,查不出任何问题。
+
 ## 最后:那个引擎选择器删掉了
 
 它是**系统那个设置的劣质副本**。Android 本来就有「默认语音识别服务」,系统那条
