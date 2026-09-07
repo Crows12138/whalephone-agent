@@ -10,14 +10,20 @@
 # 文件直接进相册。而 adb 那个停不干净 —— 实测 `kill -INT` 打过去进程不退、
 # mp4 停在 33 KB 收不了尾,得靠 --time-limit 自然结束,而任务耗时是不定的。
 #
-# 脚本负责机器能做的:查环境、开取景窗、按你的节奏掐时间发任务、播报任务结束。
+# 脚本负责机器能做的:查环境、开悬浮窗、发任务(或等你从悬浮球发)、播报任务结束。
 # **打字的人只能是你**,而且要真人用输入法打中文 —— `input text` 注入的是按键
 # 事件,不经过输入法的组词缓冲,而「正在组词」恰恰是这个项目最难的一条判据
 # (见 FINDINGS)。注入录出来的视频看着一样,却没演示到那条路。
 #
-# 用法:
-#   bash scripts/demo-record.sh                 # 默认目标(比价)
-#   bash scripts/demo-record.sh "你的目标"
+# 两种发任务的方式:
+#
+#   FROM=ball bash scripts/demo-record.sh       # 你自己点悬浮球下任务(推荐)
+#   bash scripts/demo-record.sh "你的目标"       # 脚本用 adb 发
+#
+# 推荐前者:视频里全程不出现电脑,而且顺带演示了「不打开 app 也能下任务、点一下
+# 就地展开语音、不抢你的键盘」—— 那是这个项目最能说明问题的一个动作。后者只在
+# 语音识别不配合、或者你想反复跑同一个目标时用。
+#
 #   LEAD=20 bash scripts/demo-record.sh         # 改开录到发任务之间的间隔
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -25,8 +31,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 A=ai.whalephone.agent
 GOAL="${1:-帮我看看 AirPods Pro 2 在淘宝上现在最便宜多少,前三个价格都告诉我}"
+FROM="${FROM:-adb}"
 
-# 你按下回车之后,留多少秒让你切到微信、把光标放进输入框、开始打字
+# 你按下回车之后,留多少秒让你切到那个 App、把光标放进输入框、开始打字
 LEAD="${LEAD:-15}"
 
 say() { echo; echo "▶ $*"; }
@@ -46,26 +53,41 @@ echo "  模型接口已配置"
 sh dumpsys power | grep -q "mWakefulness=Awake" || die "先把屏幕点亮(副屏跟着主屏的电源组走)"
 echo "  屏幕亮着"
 
-# ------------------------------------------------------------------ 打开取景窗
-# 坐标不写死:布局一变就点空,而点空了你要到录像里才发现。
-say "打开取景窗"
-if sh dumpsys window windows | grep -qE "Window\{[a-f0-9]+ u0 $A\}"; then
-  echo "  已经开着"
+# ------------------------------------------------------------------ 打开悬浮窗
+# 开关的坐标不写死:布局一变就点空,而点空了你要到录像里才发现。
+# 从悬浮球下任务的话两个都要;脚本发任务的话只要取景窗,但都开着也不碍事。
+say "打开悬浮窗"
+WANT="看副屏"
+[ "$FROM" = "ball" ] && WANT="看副屏 悬浮球"
+HAVE=$(sh dumpsys window windows | grep -cE "Window\{[a-f0-9]+ u0 $A\}")
+NEED=$(set -- $WANT; echo $#)
+if [ "$HAVE" -ge "$NEED" ]; then
+  echo "  已经开着($HAVE 个)"
 else
   sh am start -n $A/.MainActivity >/dev/null
   python -c "import time;time.sleep(2)"
   sh uiautomator dump /sdcard/wp-ui.xml >/dev/null 2>&1
-  B=$(sh cat /sdcard/wp-ui.xml | tr '<' '\n' | grep -F 'text="看副屏"' \
-      | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+' | tr '\n' ' ')
+  for T in $WANT; do
+    B=$(sh cat /sdcard/wp-ui.xml | tr '<' '\n' | grep -F "text=\"$T\"" \
+        | grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+' | tr '\n' ' ')
+    [ -n "$B" ] || die "界面上找不到「$T」开关"
+    set -- $B
+    sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null
+    python -c "import time;time.sleep(2)"
+  done
   sh rm -f /sdcard/wp-ui.xml >/dev/null 2>&1
-  [ -n "$B" ] || die "界面上找不到「看副屏」开关"
-  set -- $B
-  sh input -d 0 tap $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) >/dev/null
-  python -c "import time;time.sleep(2)"
   sh dumpsys window windows | grep -qE "Window\{[a-f0-9]+ u0 $A\}" \
-    || die "点了开关但取景窗没起来 —— 多半是「显示在其他应用上层」权限还没给"
+    || die "点了开关但悬浮窗没起来 —— 多半是「显示在其他应用上层」权限还没给"
   echo "  已打开"
 fi
+
+# 从悬浮球下任务时,得知道「新的一条任务开始了」。拿开录前的行数当基线:
+# 对话记录是只追加的,多出来的那些就是这一轮。
+BASE=$(sh "run-as $A cat files/chat.json" | python -c "
+import sys,json
+try: print(len(json.loads(sys.stdin.read())[-1]))
+except Exception: print(0)
+" 2>/dev/null)
 
 # ------------------------------------------------------------------------ 开拍
 cat <<TIP
@@ -73,12 +95,14 @@ cat <<TIP
 ────────────────────────────────────────────────────────
   目标:$GOAL
 
+  发任务的方式:$([ "$FROM" = ball ] && echo '你点悬浮球(脚本只旁观)' || echo "脚本在第 ${LEAD} 秒用 adb 发")
+
   顺序:
     1. 下拉快捷面板,点「屏幕录制」,开始录
     2. 回来按这里的回车
-    3. 立刻切到微信(或备忘录),**用中文打字,一直不停**
-    4. 第 ${LEAD} 秒 agent 自己开工。别管它,继续打
-    5. 脚本会播报「任务结束」。再录十几秒,回微信核对这四条:
+    3. 立刻切到那个 App,**用中文打字,一直不停**
+    4. $([ "$FROM" = ball ] && echo '打一会儿之后,手不离开这个界面,点一下悬浮球,说出目标' || echo "第 ${LEAD} 秒 agent 自己开工")。别管它,继续打
+    5. 脚本会播报「任务结束」。再录十几秒,回去核对这四条:
          · 刚才打的字一个不少,中间没有断点
          · 页面没有莫名其妙后退
          · 长按输入框粘贴,还是你演示前复制的那段
@@ -86,16 +110,29 @@ cat <<TIP
     6. 停止录屏。视频在相册里
 
   取景窗挡住输入框的话拖开它,整个窗口哪里都能拖。
-  录之前建议先复制一段文字(用来核对第 3 条),并且用一个不介意入镜的聊天窗口。
+  录之前先复制一段文字(用来核对第 3 条)。录屏会把屏上一切都录进去,
+  所以打字的目标选一个不介意入镜的 —— AI 聊天、备忘录都行,别用真实聊天记录。
 ────────────────────────────────────────────────────────
 TIP
-read -r -p "录屏已经开始了?按回车,${LEAD} 秒后发任务…" _
+read -r -p "录屏已经开始了?按回车…" _
 
-for i in $(seq "$LEAD" -1 1); do printf "\r  %2d 秒后发任务,开始打字… " "$i"; python -c "import time;time.sleep(1)"; done
-printf "\r%40s\r" " "
-
-say "发任务"
-bc -a $A.RUN --es goal "'$GOAL'" >/dev/null
+if [ "$FROM" = "ball" ]; then
+  say "等你点悬浮球下任务(最多 3 分钟)"
+  for _ in $(seq 90); do
+    python -c "import time;time.sleep(2)"
+    N=$(sh "run-as $A cat files/chat.json" | python -c "
+import sys,json
+try: print(len(json.loads(sys.stdin.read())[-1]))
+except Exception: print(0)
+" 2>/dev/null)
+    [ "${N:-0}" -gt "${BASE:-0}" ] && { echo "  收到了"; break; }
+  done
+else
+  for i in $(seq "$LEAD" -1 1); do printf "\r  %2d 秒后发任务,开始打字… " "$i"; python -c "import time;time.sleep(1)"; done
+  printf "\r%40s\r" " "
+  say "发任务"
+  bc -a $A.RUN --es goal "'$GOAL'" >/dev/null
+fi
 
 # 等任务结束。看 app 自己落盘的对话记录,不看 logcat —— 这台机器日志转得太快,
 # 长任务的开头会被冲掉,而这里只关心「最后一行是不是结论」。
@@ -120,7 +157,7 @@ print()
 print('══ 任务结束 ══', last.get('k',''))
 print((last.get('t') or '(空)'))
 print()
-print('现在回微信核对那四条,核完停止录屏。')
+print('现在回去核对那四条,核完停止录屏。')
 " 2>/dev/null
 
 echo
