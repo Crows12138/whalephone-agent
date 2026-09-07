@@ -36,6 +36,10 @@ FROM="${FROM:-adb}"
 # 你按下回车之后,留多少秒让你切到那个 App、把光标放进输入框、开始打字
 LEAD="${LEAD:-15}"
 
+# 开录前把这个包停掉,让任务从「刚打开的 App」开始而不是上一轮的残留页面。
+# 设成空串就不重置。
+RESET_PKG="${RESET_PKG-com.taobao.taobao}"
+
 say() { echo; echo "▶ $*"; }
 die() { echo "✗ $*"; exit 1; }
 
@@ -66,6 +70,19 @@ case "$(sh settings get global zen_mode)" in
   1|2|3) echo "  勿扰开着" ;;
   *)     echo "  ! 勿扰没开,微信/邮件弹出来会直接进画面(下拉面板点一下)" ;;
 esac
+
+# App 上一轮被停在哪一页,下一轮 launch 回去还是那一页。实测过一次:上一个任务
+# 停在淘宝购物车,这一轮的「搜索」就搜进了**购物车内搜索框**,模型照样报了个
+# 「第一个商品」,而那是购物车搜不到时的降级列表。演示要从确定的起点开始。
+# 只在机主此刻没在用它的时候停 —— 在用的话这一条跳过,别去动机主的前台。
+if [ -n "$RESET_PKG" ]; then
+  if sh dumpsys window displays | sed -n '/mDisplayId=0/,/mDisplayId=[1-9]/p'        | grep -q "mCurrentFocus.*$RESET_PKG"; then
+    echo "  ! 机主正在用 $RESET_PKG,没去重置它 —— 任务会从他停的那一页开始"
+  else
+    sh am force-stop "$RESET_PKG" >/dev/null
+    echo "  $RESET_PKG 已回到干净起点"
+  fi
+fi
 
 # 副屏和主屏共用电源组,主屏一灭副屏跟着灭,那一轮什么都做不了
 sh dumpsys power | grep -q "mWakefulness=Awake" || die "先把屏幕点亮(副屏跟着主屏的电源组走)"
