@@ -212,8 +212,8 @@ class AgentService : Service() {
 
         startFeedIfAsked()
 
-        val hands = Hands(probe, displayId, this)
-        val agent = Agent(hands, llm, goal, history = doneInThisThread())
+        val hands = Hands(probe, displayId, this) { shared?.frameJpeg() }
+        val agent = Agent(hands, llm, goal, history = doneInThisThread(), vlm = Config.vlm(this))
         agent.onStep = { s ->
             if (!stopping) {
                 update("第 ${s.n} 步 · ${s.action}", s.result.take(80))

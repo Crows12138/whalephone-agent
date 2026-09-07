@@ -24,6 +24,14 @@ class Hands(
     val svc: AccessibilityService,
     val displayId: Int,
     ctx: Context,
+    /**
+     * 这块屏当前那一帧的 JPEG,无障碍树读不出东西时给视觉模型看。
+     *
+     * 用函数传进来而不是让 Hands 自己去拿:那块屏是 AgentService 造的、也归它销毁,
+     * Hands 不该知道它的存在。开发夹具那条路(EyesAndHands 自己建的 Hands)没有
+     * 自己的屏,传 null,看图那条路在那边就是不可用 —— 不可用比拿到一块别人的屏好。
+     */
+    private val frame: (() -> ByteArray?)? = null,
 ) {
     private val ctxRef = ctx
     private val clipboard = ClipboardGuard(ctx)
@@ -68,6 +76,30 @@ class Hands(
      * 注意无障碍动作(performAction)不走这里 —— 它根本不经过输入系统,不碰焦点。
      */
     private fun inject(vararg argv: String): String = Privileged.execArgs(*argv)
+
+    /** 这一帧的 base64 JPEG,拿不到返回 null */
+    fun frameB64(): String? = frame?.invoke()
+        ?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
+
+    /**
+     * 按归一化坐标点一下。模型看图报的是 0-1000 的相对位置,不是像素 ——
+     * 截图缩过、不同机器分辨率也不同,让模型算像素等于把这些都塞给它。
+     *
+     * 这条路上没有节点可用,所以只能真实触摸;也正因为没有节点,点完必须自己
+     * 验一下界面动没动 —— 树那条路还能靠 performAction 的返回值兜个底,这条路
+     * 唯一的反馈就是屏幕。
+     */
+    fun tapAt(nx: Int, ny: Int): String {
+        if (nx !in 0..1000 || ny !in 0..1000) return "坐标要在 0 到 1000 之间,你给的是 ($nx, $ny)"
+        val x = nx * metrics.widthPixels / 1000
+        val y = ny * metrics.heightPixels / 1000
+        val moved = changed { inject("input", "-d", "$displayId", "tap", "$x", "$y") }
+        // 点完清掉序号那条路的记忆:这一帧的元素身份是按位置记的,而看图这一步
+        // 很可能已经把界面换掉了,留着会让下一次误判成「这个元素点不动」
+        dead.clear(); pending = null; lastId = null
+        return if (moved) "已在 ($nx, $ny) 点了一下"
+        else "在 ($nx, $ny) 点了一下,界面没有反应 —— 那个位置多半没有能点的东西,换一处"
+    }
 
     /** 机主在打字就先等着。每个动作前都过一遍,返回让了多少毫秒。 */
     fun yieldToOwner(): Long = Conflict.yieldWhileOwnerTypes(svc)

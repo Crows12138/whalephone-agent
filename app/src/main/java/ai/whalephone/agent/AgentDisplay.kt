@@ -72,6 +72,32 @@ class AgentDisplay private constructor(
     /** 位图右边可能多出 rowStride 的补白,画的时候要按这个宽度裁 */
     val liveVisibleWidth get() = width
 
+    /**
+     * 这一帧的 JPEG,给视觉模型看。
+     *
+     * 用 [captureLive] 而不是 [capture]:后者在「这一瞬间没有新帧」时返回 null,
+     * 而界面静止的时候恰恰不会有新帧 —— 那正是最需要看图的时刻(树读不出东西,
+     * 页面也不动)。captureLive 在没有新帧时把上一帧还回来。
+     *
+     * 缩到长边 [maxDim]:视觉模型按像素收费也按像素限流,原图 1080x2340 既贵又常常
+     * 超过厂商的单图上限。模型输出的是归一化坐标,所以缩放不影响点击精度。
+     */
+    @Synchronized
+    fun frameJpeg(maxDim: Int = 1120, quality: Int = 80): ByteArray? {
+        val src = captureLive() ?: return null
+        return runCatching {
+            // captureLive 给的位图右边带 rowStride 补白,先裁掉
+            val cut = if (src.width == width) src
+            else android.graphics.Bitmap.createBitmap(src, 0, 0, width, height)
+            val scale = maxDim.toFloat() / maxOf(cut.width, cut.height)
+            val out = if (scale >= 1f) cut else android.graphics.Bitmap.createScaledBitmap(
+                cut, (cut.width * scale).toInt(), (cut.height * scale).toInt(), true)
+            java.io.ByteArrayOutputStream().also {
+                out.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it)
+            }.toByteArray()
+        }.onFailure { Log.w(TAG, "这一帧压不成 JPEG", it) }.getOrNull()
+    }
+
     @Synchronized
     fun capture(): Bitmap? {
         val img = reader.acquireLatestImage() ?: return null

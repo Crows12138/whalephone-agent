@@ -29,6 +29,16 @@ class Agent(
      * 当前那一帧就在同一份提示词里,界面是什么样让它自己看。
      */
     private val history: List<Pair<String, String>> = emptyList(),
+    /**
+     * 看图那条路的模型。没配就是 null,agent 退回纯文本 —— 不假装自己能看图。
+     *
+     * 为什么要有这条路:无障碍树是唯一能读**非焦点显示器**的通道(见 TECH-CHOICES
+     * 第五节),这条硬约束没变。但树读不读得到,取决于 App 愿不愿意暴露节点 ——
+     * 淘宝的商品详情弹层和购物车整页自绘,树里一个带文字的元素都没有(把同一个
+     * Activity 起到主屏上一样是零,所以和副屏无关)。这时候画面里明明什么都有,
+     * 而我们本来就在读那块屏的帧(取景窗就是读它的),缺的只是把它接进模型。
+     */
+    private val vlm: Llm? = null,
 ) {
     data class Step(val n: Int, val thought: String, val action: String, val result: String)
     data class Outcome(val done: Boolean, val message: String, val trace: List<Step>)
@@ -103,8 +113,19 @@ class Agent(
                 return Outcome(false, "界面连续 4 步没有变化,判定卡住了", trace)
             }
 
+            // 树给不出任何带文字的元素时退到看图。只在这时候退 —— 树能用的时候它
+            // 更便宜、更准、还带得动 set_text,没有理由为了统一而全程烧视觉模型。
+            val eyes = vlm?.takeIf { snap.speechless }
+            val shot = eyes?.let { hands.frameB64() }
             val reply = runCatching {
-                llm.chat(
+                if (eyes != null && shot != null) eyes.chat(
+                    listOf(
+                        Llm.Message("system", SYSTEM_EYES),
+                        Llm.Message("user", userTurn(n, EYES_NOTE), imageB64 = shot),
+                    ),
+                    // 带图的请求要上传几百 KB,手机上网速抖,给它比文本更宽的余量
+                    timeoutMs = 90_000,
+                ) else llm.chat(
                     listOf(
                         Llm.Message("system", SYSTEM),
                         Llm.Message("user", userTurn(n, render)),
@@ -119,7 +140,7 @@ class Agent(
 
             val thought = act.optString("thought")
             val name = act.optString("action")
-            Log.i(TAG, "第 $n 步 $name  $thought")
+            Log.i(TAG, "第 $n 步 $name${if (shot != null) "(看图)" else ""}  $thought")
 
             when (name) {
                 "done" -> {
@@ -211,6 +232,9 @@ class Agent(
                 .firstNotNullOfOrNull { k -> a.optString(k).takeIf { it.isNotBlank() } }
                 ?: throw IllegalArgumentException("launch 要一个 package 参数(app 显示名或包名)")
         )
+        // 看图那条路上唯一的定位手段。归一化 0-1000,不是像素 ——
+        // 截图缩过、机器分辨率也各不相同,让模型算像素等于把这些都推给它。
+        "tap"        -> hands.tapAt(a.getInt("x"), a.getInt("y"))
         "back"       -> hands.back()
         "home"       -> hands.home()
         // 空屏上等待是**证明无效**的:副屏上一个 App 都没起来,不存在正在加载的东西,
@@ -289,6 +313,52 @@ class Agent(
 
     companion object {
         private const val TAG = "WPAgent"
+
+        /** 看图那一步,userTurn 末尾用它替掉元素清单 */
+        private const val EYES_NOTE =
+            "(这一屏的无障碍树读不出任何文字,所以给你的是它的截图。看图决定下一步。)"
+
+        /**
+         * 看图那条路的提示词。
+         *
+         * 和文本那条路是两套接口,不是同一套的变体:那边按序号操作、有 set_text,
+         * 这边只有坐标、不能打字。把两套动作表塞进一份提示词,模型会在没有序号的
+         * 那一屏上继续报序号。所以分开写,各自只说自己那套。
+         */
+        private val SYSTEM_EYES = """
+            你在操作一台安卓手机的「副屏」。手机主人此刻正在同一台手机的主屏上做他自己的事,
+            他不应该察觉到你的存在 —— 他的画面、焦点、键盘都不归你用。
+
+            这一屏的界面读不出文字(这类页面整页是自绘的),所以给你的是**副屏的截图**。
+            看图决定下一步,用坐标操作。
+
+            坐标是**归一化**的:横竖都是 0 到 1000,(0,0) 左上角,(1000,1000) 右下角。
+            不要给像素值。
+
+            每一步只输出一个 JSON 对象,前后不要有别的文字:
+            {"thought":"一句话说明这一步为什么","action":"动作名", ...动作参数}
+
+            可用动作:
+              tap    x, y(点屏幕上的一个位置,给元素的中心)
+              swipe  direction("up"/"down"/"left"/"right")
+              back   (无参数,只在副屏上返回)
+              home   (无参数,回副屏自己的桌面)
+              wait   ms
+              note   text(把看到的事实记下来,后面每一轮都还看得到)
+              done   summary(任务结果,说清楚查到/做成了什么)
+              ask    question(需要主人拍板的事。他答完你会在「他答了的」里看到原话,
+                     接着往下做 —— 问一句不结束任务)
+
+            必须守的几条:
+            - 只点你在图上真的看见的东西。看不清就先 swipe 翻一翻,或者 wait 等它加载完。
+            - 上一步结果里写「界面没有反应」的,就是没点中。同一处再点结果一样,
+              换个位置或者换条路。
+            - 这条路上**没法打字**。要输入文字就先 back 回到上一页,那里通常读得到元素。
+            - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
+            - 目标里某一项确实做不到时,把做到的 note 下来然后 done,在 summary 里说清楚
+              哪一项没成、你试过什么。**无限试下去是最差的结果。**
+            - 目标达成就立刻 done,不要多点。
+        """.trimIndent()
 
         private val SYSTEM = """
             你在操作一台安卓手机的「副屏」。手机主人此刻正在同一台手机的主屏上做他自己的事,

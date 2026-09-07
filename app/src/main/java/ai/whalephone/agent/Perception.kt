@@ -82,6 +82,17 @@ object Perception {
             elements.forEach { appendLine(it.render()) }
         }
         fun byIndex(i: Int): Element? = elements.getOrNull(i)
+
+        /**
+         * 树里一个带文字的元素都没有 —— 对模型来说这一屏是瞎的。
+         *
+         * 不等于 elements 为空。淘宝的商品规格弹层给的是一堆既没有 text 也没有
+         * contentDescription 的容器,数量不为零,但模型从中得不到任何可据以决策的
+         * 信息:序号还在,却不知道哪个序号是「确定」。实测这两种情况都出现过,
+         * 而它们对下一步的含义是同一个:文本这条通路在这一屏上没用,该看图了。
+         */
+        val speechless: Boolean
+            get() = elements.none { !it.text.isNullOrBlank() || !it.desc.isNullOrBlank() }
     }
 
     /** windows 由调用方从 getWindowsOnAllDisplays() 取,便于单独测试这一层 */

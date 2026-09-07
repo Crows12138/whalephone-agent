@@ -40,6 +40,17 @@ class SettingsActivity : Activity() {
             note("DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_url 和 model 即可。密钥只存在这台手机上。"),
         ))
 
+        section(col, "看图那条路(可选)")
+        col.addView(card(
+            *labeled("模型名(留空=不开这条路)", field(Config.KEY_VLM_MODEL, "比如 glm-4v / qwen-vl-max")),
+            *labeled("base_url(留空=沿用上面那个)", field(Config.KEY_VLM_BASE_URL, "留空即可")),
+            *labeled("密钥(留空=沿用上面那个)", field(Config.KEY_VLM_API_KEY, "留空即可", password = true)),
+            note("有些 App 的页面整页是自绘的(淘宝的商品规格弹层、购物车就是)," +
+                "对系统的无障碍接口一个带文字的元素都读不出来 —— 纯文本模型在那种页面上是瞎的。" +
+                "填了视觉模型之后,遇到这种页面它会改看副屏截图、按坐标操作,其余时候仍然走文本(更快更准也更便宜)。" +
+                "DeepSeek 没有视觉模型,所以这里通常要填另一家。"),
+        ))
+
         section(col, "让路:键盘还开着但没动静,等多久算你停手了")
         col.addView(card(
             *labeled("你一个键都没按过(毫秒)", field("TYPING_IDLE_MS", "10000", "10000", number = true)),
