@@ -476,18 +476,35 @@ class AgentService : Service() {
         val liveDisplay: AgentDisplay? get() = shared
         const val FEED_PATH = "/sdcard/Download/wp_vd.png"
 
-        fun start(ctx: Context, goal: String) {
-            ctx.startForegroundService(Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))
+        /**
+         * Android 12 起,后台进程不许起前台服务,`startForegroundService` 会直接抛
+         * `ForegroundServiceStartNotAllowedException` —— **在广播接收器里抛就是崩溃**,
+         * 整个进程被打死。真机上撞到过:app 退到后台、两个悬浮窗又都关着,
+         * 一条 `am broadcast` 下去,app 当场崩了。
+         *
+         * 有前台窗口(机主正开着界面)或者已经有一个前台服务在跑(悬浮球那个服务
+         * 就是前台服务)的时候不受限,所以三条真实入口 —— 界面、悬浮球、通知里回话
+         * —— 本来就不会走到这里。会走到的是广播这条开发入口和长时任务的亮屏那一轮。
+         *
+         * 拦不住这条系统限制,但**不能让它变成崩溃**:失败就如实说一句,让人看得懂
+         * 该怎么办。返回值给调用方,想提示机主的自己提示。
+         */
+        fun start(ctx: Context, goal: String): Boolean = launch(ctx,
+            Intent(ctx, AgentService::class.java).putExtra(EXTRA_GOAL, goal))
+
+        private fun launch(ctx: Context, i: Intent): Boolean = try {
+            ctx.startForegroundService(i); true
+        } catch (e: Exception) {
+            Log.w(TAG, "起不来前台服务(app 在后台且没有悬浮窗时系统不允许):" +
+                "打开一次界面,或者把悬浮球打开", e)
+            false
         }
 
         /** 回答 agent 刚问的那句话。界面、悬浮球、通知里的直接回复都走这里 */
-        fun answer(ctx: Context, text: String) {
-            ctx.startForegroundService(
-                Intent(ctx, AgentService::class.java)
-                    .setAction(ACT_ANSWER)
-                    .putExtra(EXTRA_TEXT, text)
-            )
-        }
+        fun answer(ctx: Context, text: String): Boolean = launch(ctx,
+            Intent(ctx, AgentService::class.java)
+                .setAction(ACT_ANSWER)
+                .putExtra(EXTRA_TEXT, text))
 
         /** 长时任务的一轮,由 Watch 的闹钟触发 */
         fun startRound(ctx: Context, goal: String) = start(ctx, goal)

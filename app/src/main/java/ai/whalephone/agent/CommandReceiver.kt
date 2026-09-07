@@ -23,6 +23,6 @@ class CommandReceiver : BroadcastReceiver() {
         val goal = i.getStringExtra("goal").orEmpty()
         if (goal.isBlank()) return
         Log.i("WPCmd", "收到任务: $goal")
-        AgentService.start(c, goal)
+        if (!AgentService.start(c, goal)) Log.w("WPCmd", "这条任务没能开跑,原因见上一行")
     }
 }

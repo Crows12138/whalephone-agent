@@ -92,6 +92,8 @@ class Agent(
             val idled = render == lastRender && !lastStepYielded &&
                 trace.lastOrNull()?.action.let { it != null && it != "note" }
             lastStepYielded = false   // 判完就清:它描述的是**上一步**
+            // 这条事实 Hands 也要:它靠它决定「这个元素是不是点不动、该补真实触摸」
+            hands.noteIdle(idled)
             if (idled) {
                 sameCount++
                 trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "  ← 界面没有任何变化") }

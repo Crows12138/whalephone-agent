@@ -118,36 +118,76 @@ class Hands(
         return byEvent || byRender
     }
 
-    /** 上一次点的是谁。模型重复点同一个元素,是「上一次没起作用」最可靠的证据。 */
-    private var lastClicked: Pair<Int, String>? = null
+    /** 这一步点的是谁。等 Agent 算出界面动没动,再决定要不要把它记成「点不动」 */
+    private var pending: String? = null
+
+    /**
+     * 点过、而且那一下**界面什么都没发生**的元素。界面一变就整体清空。
+     *
+     * 序号每一步都会重新编号,不能当身份用,所以键取「标签 + 屏幕位置」。
+     */
+    private val dead = mutableSetOf<String>()
+
+    /**
+     * Agent 每一步算出的「上一步界面动没动」回流到这里。
+     *
+     * 这条事实 Agent 本来就在算(它要靠这个判卡死、也要写回给模型看),
+     * 只是一直没告诉 Hands。Hands 缺的恰恰就是它 —— 见下面 click 的注释。
+     */
+    fun noteIdle(idled: Boolean) {
+        if (idled) pending?.let { dead += it } else dead.clear()
+        lastId = pending
+        pending = null
+    }
+
+    /** 紧邻的上一次点击。[dead] 在动画页面上会被频繁清空,这条兜住那种情况 */
+    private var lastId: String? = null
+
+    /** 元素的身份。序号不行(每步重编),标签也不够(一屏可能好几个同名按钮) */
+    private fun idOf(e: Perception.Element, b: Rect) = "${e.label()}@${b.flattenToString()}"
 
     /**
      * 两级:先无障碍点击,不行才补一次真实触摸。
      *
-     * 难点是**什么时候算「不行」**。一开始我用「界面动没动」来判,结果两头都出事:
-     *   - 漏判(界面其实变了却没测到)会补第二次触摸,把已经生效的操作再做一遍。
-     *     实测三星计算器按 128,补出来是 122 —— 换成购物 App 就是重复下单。
-     *   - 而 performAction 的返回值又不能信:淘宝详情页的店铺按钮只挂 onTouchListener,
-     *     节点收下动作、返回 true,什么也不会发生。
+     * 难点是**什么时候算「不行」**。`performAction` 的返回值不能信:淘宝详情页的
+     * 按钮只挂 onTouchListener,节点收下动作、返回 true,什么也不会发生。而反过来,
+     * 只要判错一次就会把一个**已经生效**的操作再做一遍 —— 实测三星计算器按 128
+     * 补出来是 122,换成购物 App 就是重复下单。所以这个判据宁可漏,不能错。
      *
-     * 所以判据不该由我猜,应该看模型的行为:**它又点了同一个元素**,就说明上一次
-     * 确实没起作用 —— 这个信号来自真实后果,不来自我的检测。代价是那种按钮要多花
-     * 一步,换来的是永远不会把一个已生效的操作做第二遍。
+     * 判据改过两次:
      *
-     * 无障碍点击直接返回 false 的,不用等重试,当场就补。
+     * 一版用「界面动没动」直接判,漏判(界面其实变了却没测到)就补第二次触摸,
+     * 不安全。二版改成看模型的行为 —— **它又点了同一个元素**,说明上一次确实
+     * 没起作用,信号来自真实后果而不是我的检测。但二版只记了**紧邻的**上一次点击,
+     * 而提示词恰恰教模型「点不动就换个元素、换条路」:真机上模型在两次重试
+     * 「加入购物车」之间插了一次探索性点击,记录就被冲掉,兜底永远不触发 ——
+     * 提示词教的行为把兜底的触发条件正好绕开了。
+     *
+     * 现版取两者的并集:「**点过之后界面没动**」([dead],跨步数记着)**或者**
+     * 「紧邻的上一次点的就是它」([lastId],二版那条规则原样留着)。
+     *
+     * 两条都要,因为各自都有盲区:[dead] 靠「界面动没动」判定,而淘宝详情页有
+     * 轮播和懒加载,界面每一步都在变,集合每步都被清空 —— 实测就是这样,它一个
+     * 元素都记不住;[lastId] 则会被模型「换个元素试试」的行为冲掉。
+     *
+     * 并且认定「点不动」之后**不再白点一次无障碍**,直接走真实触摸。原来那版在
+     * again 成立时是无障碍点击 + 真实触摸两下都做,那正是「重复下单」的来源;
+     * 现在任何一步都只落一次动作。
      */
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
-        val who = i to e.label()
-        val again = lastClicked == who
-        lastClicked = who
-
-        val ok = Actions.click(e)
-        Thread.sleep(SETTLE_MS)
-        if (ok && !again) return "已点击 [$i] ${e.label()}"
-
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        if (b.isEmpty) return if (ok) "已点击 [$i] ${e.label()}" else "点不动 [$i],也拿不到它的位置"
+        val id = idOf(e, b)
+        val known = id in dead || id == lastId
+        pending = id
+
+        if (!known) {
+            val ok = Actions.click(e)
+            Thread.sleep(SETTLE_MS)
+            if (ok) return "已点击 [$i] ${e.label()}"
+        }
+
+        if (b.isEmpty) return "点不动 [$i],也拿不到它的位置"
         val moved = changed {
             inject("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
         }
