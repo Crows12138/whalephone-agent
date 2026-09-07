@@ -100,13 +100,24 @@ class Agent(
             // 让过路的那一步本来就没动手,界面当然没变 —— 它不能算进「原地踏步」。
             // 不排掉的话,机主多打几次字,任务就会被误判成卡死。
             val idled = render == lastRender && !lastStepYielded &&
-                trace.lastOrNull()?.action.let { it != null && it != "note" }
+                trace.lastOrNull()?.action.let { it != null && it != "note" && it != "look" }
             lastStepYielded = false   // 判完就清:它描述的是**上一步**
+            // 这一轮开头的画面。和上一轮开头那张一对比,就知道中间那个动作改变了什么。
+            // 每轮都取是因为「值不值得对比」要等下面算完 idled 才知道,那时候动作
+            // 早就做完了 —— 事前留一张,是唯一能拿到「之前」的时机。
+            val shotBefore = lastShot
+            lastShot = vlm?.let { hands.frameB64() }
             // 这条事实 Hands 也要:它靠它决定「这个元素是不是点不动、该补真实触摸」
             hands.noteIdle(idled)
             if (idled) {
                 sameCount++
                 trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "  ← 界面没有任何变化") }
+                // 树没变不等于什么都没发生。角标数字、浮层提示、选中态、按钮变灰 ——
+                // 这些全在像素里,而不在无障碍树里。真去看一眼,把结论交给模型。
+                reflect(shotBefore, lastShot)?.let { v ->
+                    trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "(核对前后两帧:$v)") }
+                    Log.i(TAG, "     核对 -> $v")
+                }
             } else sameCount = 0
             lastRender = render
             if (sameCount >= 3) {
@@ -115,8 +126,9 @@ class Agent(
 
             // 树给不出任何带文字的元素时退到看图。只在这时候退 —— 树能用的时候它
             // 更便宜、更准、还带得动 set_text,没有理由为了统一而全程烧视觉模型。
-            val eyes = vlm?.takeIf { snap.speechless }
+            val eyes = vlm?.takeIf { snap.speechless || wantEyes }
             val shot = eyes?.let { hands.frameB64() }
+            wantEyes = false   // 要过一次就清,别让它黏在后面每一轮上
             val reply = runCatching {
                 if (eyes != null && shot != null) eyes.chat(
                     listOf(
@@ -165,6 +177,14 @@ class Agent(
                     if (v.isNotBlank()) notes += v
                     record(n, thought, name, "记下了:$v")
                 }
+                "look" -> {
+                    if (vlm == null) record(n, thought, name,
+                        "看图那条路没配(设置里 VLM_MODEL 是空的),这一屏只能靠元素列表")
+                    else {
+                        wantEyes = true
+                        record(n, thought, name, "好,下一轮给你这一屏的截图")
+                    }
+                }
                 // 参数缺了、类型不对、序号越界 —— 这些不该杀掉整个任务。
                 // 模型下一轮看得到错在哪,自己就能改;抛出去则是一步走错、满盘皆输。
                 else -> record(n, thought, name,
@@ -178,6 +198,58 @@ class Agent(
 
     /** 上一步是不是「让了路、没动手」。卡死检测要跳过这种步。 */
     private var lastStepYielded = false
+
+    /**
+     * 模型主动要了一张截图,下一轮走看图那条路。
+     *
+     * 自动触发的判据 [Perception.Snapshot.speechless] 是「整屏一个带文字的元素都没有」——
+     * 全有或全无。而真正常见的是**半瞎**:淘宝购物车整页自绘,树里只剩底部那条
+     * 导航栏的五个 tab 有文字,商品一行都没有。于是 speechless=false,看图不触发,
+     * 模型对着一份只有导航栏的列表反复 scroll,最后被判卡死。
+     * (更糟的是它还是个竞态:快照拍在导航栏渲染出来之前就 speechless=true,
+     * 之后就 false —— 同一个页面时灵时不灵。)
+     *
+     * 框架判不出「这一屏有没有它要找的东西」,模型判得出。而这次敢交给模型判,是因为
+     * **判错的代价是廉价的**:多花一次视觉调用,下一步照样能干活。上一轮那个由模型
+     * 标注「哪个动作是提交」的设计栽了,栽在标错会把 agent 锁死 —— 能交出去的判断,
+     * 是那些判错了也不致命的。
+     */
+    private var wantEyes = false
+
+    /** 上一轮开头那一帧。和这一轮开头那一帧一对比,就知道中间那个动作改变了什么 */
+    private var lastShot: String? = null
+
+    /**
+     * 核对上一步到底生效了没有。看不出来、或者这一步不值得核对,返回 null。
+     *
+     * 为什么要单独一次调用,而不是在主提示词里多写一条规则:实测写过 —— 模型读懂了、
+     * 复述了「不确定就去核对,别原地重点」,然后还是又点了一次。**让干活的模型自己
+     * 管住自己是不行的,它需要的是证据不是纪律。** 这一步产出的就是证据:一句
+     * 「角标从 3 变成 4 了」比十条规则管用。
+     *
+     * 只在「无障碍树一点没变」的时候才调,不是每步都调 —— 树变了模型自己看得见,
+     * 没必要多花一次视觉调用。而树没变恰恰是它最容易误判成「没点上」的时刻。
+     */
+    private fun reflect(before: String?, after: String?): String? {
+        val m = vlm ?: return null
+        if (before == null || after == null) return null
+        val last = trace.lastOrNull() ?: return null
+        if (last.action !in TOUCHY) return null
+        return runCatching {
+            m.chat(
+                listOf(
+                    Llm.Message("system", SYSTEM_REFLECT),
+                    Llm.Message(
+                        "user",
+                        "刚做的这一步:${last.action} —— ${last.result}。" +
+                            "第一张图是这一步之前,第二张是之后。",
+                        listOf(before, after),
+                    ),
+                ),
+                timeoutMs = 90_000,
+            ).trim().take(120)
+        }.getOrElse { Log.w(TAG, "核对失败", it); null }?.takeIf { it.isNotBlank() }
+    }
 
     private fun execute(name: String, a: JSONObject): String {
         // 机主在打字就先让路,**每个动作都让**,不按动作类型区分。
@@ -315,6 +387,24 @@ class Agent(
         private const val TAG = "WPAgent"
 
         /** 看图那一步,userTurn 末尾用它替掉元素清单 */
+        /** 值得核对的动作:碰了屏幕的。back/home/note/look/wait 不用问 */
+        private val TOUCHY = setOf("click", "long_click", "double_tap", "tap", "set_text", "enter")
+
+        private val SYSTEM_REFLECT = """
+            你在核对一个手机 agent 刚做完的一步到底有没有生效。
+
+            给你两张同一块屏幕的截图:第一张是那一步之前,第二张是之后。
+
+            这一步的无障碍树没有任何变化 —— 但树看不见的东西很多:角标上的数字、
+            一闪而过的提示条、选中状态、按钮变灰、列表多出一行。**只看图。**
+
+            回一句话,不超过 30 个字,必须落到画面上具体哪一处:
+            - 看得出变化:说清楚哪里变了、变成什么(例:购物车角标从 3 变成 4)
+            - 看不出任何变化:就说「两张图看不出区别」
+
+            不要猜、不要推理它「应该」发生了什么,你只报你在画面上看见的差别。
+        """.trimIndent()
+
         private const val EYES_NOTE =
             "(这一屏的无障碍树读不出任何文字,所以给你的是它的截图。看图决定下一步。)"
 
@@ -389,6 +479,7 @@ class Agent(
               back        (无参数,只在副屏上返回)
               home        (无参数,回副屏自己的桌面;界面乱了就用它重来)
               wait        ms
+              look        (无参数,要一张这一屏的截图 —— 下一轮你看到的是图,不是元素列表)
               note        text(把查到的事实记下来,后面每一轮都还看得到)
               done        summary(任务结果,说清楚查到/做成了什么)
               ask         question(需要主人拍板的事。他答完你会在「他答了的」里看到原话,
@@ -411,6 +502,10 @@ class Agent(
             - 想往输入框里写字就直接 set_text。反复点同一个元素等它「变成输入状态」是没用的。
             - 搜索框填完直接 enter 提交,比去树里找「搜索」按钮可靠 —— 那个按钮不一定在树里。
             - 副屏上可能还停着上一个任务留下的界面。不确定自己在哪就先 home,再 launch。
+            - **元素列表里没有这一屏明明该有的东西,就用 look 要张截图**,别在一份读不出
+              内容的列表上反复 scroll。判断的着眼点是列表里剩下的是什么:只剩导航栏、
+              标题、tab 这类框架性的文字,而正文一条都没有 —— 那就是整页自绘,
+              树里本来就没有,翻多少次都不会出现。
             - 一屏放不下的信息,看到一条就先 note 一条再往下翻。你每一轮只看得见当前这一帧,
               滚走了就没了 —— 靠回头再找会原地打转。
             - 目标里有几项而某一项确实找不到时,把找到的 note 下来,然后 done,

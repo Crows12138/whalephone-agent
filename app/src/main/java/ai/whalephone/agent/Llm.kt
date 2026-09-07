@@ -20,10 +20,16 @@ class Llm(
     private val model: String,
 ) {
     /**
-     * [imageB64] 不为空时按 OpenAI 的多模态格式发:content 从一个字符串变成
-     * 「文本块 + 图片块」的数组。同一套协议,智谱 / 通义 / Kimi / OpenRouter 都认。
+     * [images] 非空时按 OpenAI 的多模态格式发:content 从一个字符串变成
+     * 「文本块 + 若干图片块」的数组。同一套协议,智谱 / 通义 / Kimi / OpenRouter 都认。
+     *
+     * 允许多张是为了「对比前后两帧」这件事 —— 一张图能问「这是什么」,
+     * 只有两张能问「刚才那一下改变了什么」。
      */
-    class Message(val role: String, val content: String, val imageB64: String? = null)
+    class Message(val role: String, val content: String, val images: List<String> = emptyList()) {
+        constructor(role: String, content: String, imageB64: String?) :
+            this(role, content, listOfNotNull(imageB64))
+    }
 
     /**
      * 带重试。一次瞬时网络错误不该让整个任务前功尽弃 —— 实测跑到第 7 步时
@@ -66,7 +72,7 @@ class Llm(
 
         val bytes = body.toByteArray()
         // 带图的请求值得留一行:图有没有真的挂上去、多大,出问题时这是第一个要看的
-        messages.count { it.imageB64 != null }.let {
+        messages.sumOf { it.images.size }.let {
             if (it > 0) Log.i(TAG, "带图请求 $it 张,共 ${bytes.size / 1024} KB,模型 $model")
         }
         val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -108,12 +114,16 @@ class Llm(
         }
     }
 
-    private fun content(m: Message): Any = m.imageB64?.let { b64 ->
-        JSONArray()
+    private fun content(m: Message): Any =
+        if (m.images.isEmpty()) m.content
+        else JSONArray()
             .put(JSONObject().put("type", "text").put("text", m.content))
-            .put(JSONObject().put("type", "image_url").put("image_url",
-                JSONObject().put("url", "data:image/jpeg;base64,$b64")))
-    } ?: m.content
+            .also { arr ->
+                m.images.forEach { b64 ->
+                    arr.put(JSONObject().put("type", "image_url").put("image_url",
+                        JSONObject().put("url", "data:image/jpeg;base64,$b64")))
+                }
+            }
 
     companion object {
         private const val TAG = "WPLlm"
