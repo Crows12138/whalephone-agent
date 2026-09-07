@@ -110,13 +110,23 @@ class Agent(
             // 这条事实 Hands 也要:它靠它决定「这个元素是不是点不动、该补真实触摸」
             hands.noteIdle(idled)
             if (idled) {
-                sameCount++
-                trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "  ← 界面没有任何变化") }
                 // 树没变不等于什么都没发生。角标数字、浮层提示、选中态、按钮变灰 ——
                 // 这些全在像素里,而不在无障碍树里。真去看一眼,把结论交给模型。
-                reflect(shotBefore, lastShot)?.let { v ->
-                    trace[trace.lastIndex] = trace.last().let { it.copy(result = it.result + "(核对前后两帧:$v)") }
-                    Log.i(TAG, "     核对 -> $v")
+                val v = reflect(shotBefore, lastShot)
+                if (v != null) Log.i(TAG, "     核对 -> $v")
+                // 画面确实变了的时候,不能再说「界面没有任何变化」—— 那和我们刚
+                // 看到的东西直接矛盾,而卡死检测的前提正是「什么都没发生」。
+                // 实测撞过:三星笔记里模型正一步步认出「这是手写模式」,画面每步都在变,
+                // 却在想明白的那一步被判成卡死。真正的兜底是 maxSteps,不是这里。
+                val moved = v != null && v.startsWith(CHANGED)
+                if (!moved) sameCount++
+                trace[trace.lastIndex] = trace.last().let {
+                    it.copy(result = it.result + when {
+                        v == null   -> "  ← 界面没有任何变化"
+                        moved       -> "  ← 元素列表没变,但画面变了:" +
+                            v.removePrefix(CHANGED).trimStart(':', ':', ' ')
+                        else        -> "  ← 界面没有任何变化(比对前后两帧也看不出区别)"
+                    })
                 }
             } else sameCount = 0
             lastRender = render
@@ -229,6 +239,9 @@ class Agent(
      *
      * 只在「无障碍树一点没变」的时候才调,不是每步都调 —— 树变了模型自己看得见,
      * 没必要多花一次视觉调用。而树没变恰恰是它最容易误判成「没点上」的时刻。
+     *
+     * 代价不小:实测这个视觉模型回一句话要 40-60 秒(它有 reasoning,两张图更久)。
+     * 所以顺利的那种跑法它一次都不会触发 —— 只有卡住的时候才值这个钱。
      */
     private fun reflect(before: String?, after: String?): String? {
         val m = vlm ?: return null
@@ -387,6 +400,14 @@ class Agent(
         private const val TAG = "WPAgent"
 
         /** 看图那一步,userTurn 末尾用它替掉元素清单 */
+        /**
+         * 核对结果的前缀。**只认「变了」两个字,不认后面的冒号** ——
+         * 实测模型会写成全角的「变了:」,而提示词里给的是半角。约定一个标记就得
+         * 允许它在标点上跑偏,否则一个冒号宽度的差别会让整条判断静默失效
+         * (那一次的表现是:画面明明变了,却被计进「连续没变化」判成卡死)。
+         */
+        private const val CHANGED = "变了"
+
         /** 值得核对的动作:碰了屏幕的。back/home/note/look/wait 不用问 */
         private val TOUCHY = setOf("click", "long_click", "double_tap", "tap", "set_text", "enter")
 
@@ -398,11 +419,16 @@ class Agent(
             这一步的无障碍树没有任何变化 —— 但树看不见的东西很多:角标上的数字、
             一闪而过的提示条、选中状态、按钮变灰、列表多出一行。**只看图。**
 
-            回一句话,不超过 30 个字,必须落到画面上具体哪一处:
-            - 看得出变化:说清楚哪里变了、变成什么(例:购物车角标从 3 变成 4)
-            - 看不出任何变化:就说「两张图看不出区别」
+            **状态栏不算**:最上面那条的时间、电量、信号、通知图标,不管做没做这一步
+            都在变,和它无关。只看它们下面的内容区。
 
-            不要猜、不要推理它「应该」发生了什么,你只报你在画面上看见的差别。
+            只回一行,必须以「变了:」或「没变」开头,总共不超过 30 个字:
+            - 看得出差别:`变了:` 后面说清楚哪一处、变成什么样
+            - 看不出任何差别:只回 `没变`
+
+            落到画面上具体的位置和内容,不要猜、不要推理它「应该」发生了什么 ——
+            你只报你在两张图上看见的差别。这句话会被当成事实用来判断要不要重做,
+            报错了会让它把一件已经做成的事再做一遍。
         """.trimIndent()
 
         private const val EYES_NOTE =

@@ -30,7 +30,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 . scripts/lib.sh
 
 A=ai.whalephone.agent
-GOAL="${1:-帮我看看 AirPods Pro 2 在淘宝上现在最便宜多少,前三个价格都告诉我}"
+GOAL="${1:-打开淘宝,搜索 AirPods Pro 2,把搜索结果里第一个商品加入购物车}"
 FROM="${FROM:-adb}"
 
 # 你按下回车之后,留多少秒让你切到那个 App、把光标放进输入框、开始打字
@@ -48,6 +48,24 @@ echo "  Shizuku 在跑"
 sh "run-as $A cat shared_prefs/whalephone.xml" | grep -q 'LLM_API_KEY' \
   || die "模型密钥还没填(设置页第一栏)"
 echo "  模型接口已配置"
+
+# 每次 adb install 之后 One UI 都会把无障碍关掉,而表现是任务一发就 FAIL。
+# 这条不提醒、直接修 —— 它没有第二种正确状态。
+bash scripts/ensure-a11y.sh || die "无障碍打不开,任务发出去也没有眼睛"
+
+# 看图那条路:淘宝的商品详情、购物车整页自绘,无障碍树里读不出内容,只能靠截图。
+# VLM_MODEL 留空的话整条路是关的,而失败要等任务跑到那一步才暴露。
+if sh "run-as $A cat shared_prefs/whalephone.xml" | grep -q '<string name="VLM_MODEL"></string>'; then
+  echo "  ! 看图那条路没开(VLM_MODEL 是空的)。纯读的任务不受影响,淘宝这类会卡住"
+else
+  echo "  看图那条路开着"
+fi
+
+# 通知弹进画面就得重录。这条只提醒不拦 —— 有人就是想录真实环境。
+case "$(sh settings get global zen_mode)" in
+  1|2|3) echo "  勿扰开着" ;;
+  *)     echo "  ! 勿扰没开,微信/邮件弹出来会直接进画面(下拉面板点一下)" ;;
+esac
 
 # 副屏和主屏共用电源组,主屏一灭副屏跟着灭,那一轮什么都做不了
 sh dumpsys power | grep -q "mWakefulness=Awake" || die "先把屏幕点亮(副屏跟着主屏的电源组走)"
