@@ -58,6 +58,43 @@ Maximum supported switchable users: 1
 
 这条边界决定了必须借到更高的身份。
 
+### 淘汰:系统自带的分屏 / 多窗口
+
+三星这台机器分屏做得很好,机主也想到过复用它:两格并排,一格给自己一格给 agent。
+这条不成立,原因是一条能量出来的硬约束 —— **一块屏只有一个 `mCurrentFocus`**
+(`dumpsys window displays`:0、105、112 各列出一个,不多不少)。分屏的两格在同一块屏上,
+所以两格共用这一个焦点。
+
+用一个悬浮窗模拟「主屏上多出一格有焦点的窗口」,量机主的输入法:
+
+```
+搬之前   mInputShown=true    mImeWindowVis=3
+搬之后   mInputShown=false   mImeWindowVis=0
+```
+
+机主的界面全程没被盖住(悬浮窗只是浮在上面),键盘还是塌了 —— 焦点一变,IMMS
+就重算 IME target。agent 在分屏那一格里每点一下,就是这个后果一次。这恰恰是
+虚拟显示器的 `OWN_FOCUS` 在买的东西:两块屏各有各的焦点栈,agent 点多少下都碰不到
+机主的输入法。同样的道理也是两个悬浮窗都带 `FLAG_NOT_FOCUSABLE` 的原因。
+
+**但分屏是「接管」的落点。** 机主想自己上手时,把副屏上那个任务搬到眼前是能做的,
+而且双向:
+
+```
+am start --display 0   --windowingMode 5  -n <包名>/<Activity>   # 搬到主屏,弹出视图
+am start --display 0   --windowingMode 1  -n <包名>/<Activity>   # 搬到主屏,全屏
+am start --display 112 --windowingMode 1  -n <包名>/<Activity>   # 搬回副屏
+```
+
+实测任务在 112 和 0 之间来回搬,`dumpsys` 里的 display 号确实跟着变。两个坑:
+只给 `--display 0` 不给 `--windowingMode` 的话任务**不动**(得靠 windowingMode 变化
+触发 reparent);而且不管搬没搬成,它都打印
+`Warning: Activity not started, intent has been delivered to currently running top-most instance` ——
+这句话不能当失败读。
+
+当前版本没有把它做成按钮:接管要处理「搬走之后 agent 还跑不跑」「搬回来时任务在哪一步」
+这些状态,不是一条 shell 命令的事。取景窗因此是只读的(见 `Overlay.kt` 的规则三)。
+
 ### 选中:受信虚拟显示器 + 无障碍服务 + Shizuku
 
 三个部件各自不可替代:
