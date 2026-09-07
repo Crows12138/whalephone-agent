@@ -127,6 +127,14 @@ object Config {
      * 只有 [KEY_VLM_MODEL] 是必填的:base_url 和密钥留空就沿用主模型那一组,
      * 这样同一家同时供文本和视觉(智谱 / Kimi / 通义 / OpenRouter)时只用填一格。
      */
+    /**
+     * 语音识别引擎(扁平化的 ComponentName),留空=系统默认。
+     *
+     * 单独一个键而不是写死:识别准不准由设备上装了哪个引擎决定,不由我们的参数
+     * 决定,而这件事换一台机器答案就不同。见 Voice 的类注释。
+     */
+    const val KEY_VOICE_ENGINE = "VOICE_ENGINE"
+
     const val KEY_VLM_BASE_URL = "VLM_BASE_URL"
     const val KEY_VLM_API_KEY = "VLM_API_KEY"
     const val KEY_VLM_MODEL = "VLM_MODEL"

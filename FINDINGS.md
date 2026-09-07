@@ -1889,3 +1889,52 @@ WPLlm : 带图请求 1 张,共 112 KB
 先去能看到结果的地方(购物车、订单、会话列表)看一眼,再决定要不要重做。
 两份提示词各加一条。这一条还没有单独复测 —— 复测要再往机主的真实购物车里
 加东西,留到下一次顺带验。
+
+---
+
+# 语音识别不准:瓶颈在引擎,不在我们的参数(2026-09-07)
+
+机主真人试了一遍悬浮球的语音,反馈是「不是特别准确」。这是这条路第一次有真人
+说话的实测 —— 之前只验过面板起得来、不抢焦点、文字能实时回填。
+
+## 先排除自己这边
+
+调用参数已经是对的:`LANGUAGE_MODEL_FREE_FORM` + `EXTRA_LANGUAGE=zh-CN` +
+分段结果 + `EXTRA_CALLING_PACKAGE`。再调参数不会变,因为**准确率不是参数的函数**,
+是「哪个引擎在跑」的函数。而 `SpeechRecognizer.createSpeechRecognizer(ctx)` 用的
+是系统默认那一个,代码里从来没有指定过。
+
+这台机器上:
+
+```
+默认   com.google.android.tts/GoogleTTSRecognitionService
+其他   com.google.android.as/AiAiSpeechRecognitionService     (端上)
+       com.anthropic.claude/.bell.assist.ClaudeRecognitionService
+```
+
+默认那个是 Google 的。装着的讯飞输入法(`com.iflytek.inputmethod`)**没有注册
+RecognitionService** —— 它的语音能力只在自己的输入法界面里,标准 API 拿不到。
+
+## 改法:引擎交给机主选,不由代码定死
+
+引擎是设备级变量,换一台机器答案就不同,我们没有任何依据替他挑。设置里列出
+设备上注册过的引擎,`createSpeechRecognizer(ctx, component)`,留空=系统默认
+(今天的行为)。这不是把问题推给用户,是把一个只有他能试出答案的变量交给他。
+
+## 顺带撞到的:包可见性把列表削掉了一个
+
+第一版列出来只有两个,少了 `com.google.android.as`。原因是 Android 11+ 的包
+可见性过滤 —— 清单里那段 `<queries>` 只声明了 LAUNCHER 入口,没声明
+`android.speech.RecognitionService`,于是查不到它。补上之后三个都在。
+
+值得记的是这个失败的形状:**它不报错,只是少给你一条结果**。要不是我知道
+`pm query-services` 在 shell 里能看到三个,对着 app 里的两个是看不出问题的。
+这和第九类那个 `am broadcast` 空格截断是同一类 —— 整条链上没有一处报错,
+只有结果比应有的少。
+
+## 没做的
+
+没有自己做 ASR(录音送云端识别)。DeepSeek 那把密钥上只有文本和视觉模型,
+没有语音;为这一个便利功能再引一家供应商,不值。语音本来就是**便利**不是承诺:
+面板会把识别到的字显示出来、要你点「发送」才算数、不对可以切键盘改 ——
+这个确认步骤本身就是对识别不可靠的正面回答。

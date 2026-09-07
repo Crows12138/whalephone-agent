@@ -79,6 +79,16 @@ class SettingsActivity : Activity() {
             },
             permLine,
         ))
+
+        section(col, "语音识别引擎")
+        val engineLine = note("")
+        col.addView(card(
+            actionRow("换一个引擎试试") { pickEngine() },
+            engineLine,
+            note("识别准不准由设备上装的引擎决定,不由这个 app 的参数决定 —— " +
+                "同一句话在不同引擎上差别很大,值得挨个试一遍。留「系统默认」就是不干预。"),
+        ))
+        this.engineNote = engineLine
         this.permNote = permLine
 
         section(col, "演示")
@@ -97,6 +107,34 @@ class SettingsActivity : Activity() {
     }
 
     private var permNote: TextView? = null
+    private var engineNote: TextView? = null
+
+    /** 列出设备上注册过的识别引擎让机主选。第一项永远是「系统默认」 */
+    private fun pickEngine() {
+        val list = Voice.engines(this)
+        if (list.isEmpty()) { toast("这台设备上没有语音识别引擎"); return }
+        val names = arrayOf("系统默认") + list.map { "${it.second}\n${it.first.packageName}" }
+        val values = arrayOf("") + list.map { it.first.flattenToString() }
+        val now = Config.get(this, Config.KEY_VOICE_ENGINE)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("语音识别引擎")
+            .setSingleChoiceItems(names, values.indexOf(now).coerceAtLeast(0)) { d, i ->
+                Config.set(this, Config.KEY_VOICE_ENGINE, values[i])
+                d.dismiss()
+                renderEngine()
+                toast("下次点悬浮球就用它了")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun renderEngine() {
+        val now = Config.get(this, Config.KEY_VOICE_ENGINE)
+        engineNote?.text = "现在用的:" + if (now.isBlank()) "系统默认"
+        else Voice.engines(this).firstOrNull { it.first.flattenToString() == now }
+            ?.let { "${it.second}(${it.first.packageName})" }
+            ?: "$now(已经不在这台设备上了,会退回系统默认)"
+    }
 
     override fun onResume() {
         super.onResume()
@@ -105,6 +143,7 @@ class SettingsActivity : Activity() {
             append("\n录音权限:").append(if (Voice.micGranted(this@SettingsActivity)) "已给" else "还没给")
             append("\n语音识别:").append(if (Voice.available(this@SettingsActivity)) "这台机器上可用" else "这台机器上没有")
         }
+        renderEngine()
     }
 
     /**

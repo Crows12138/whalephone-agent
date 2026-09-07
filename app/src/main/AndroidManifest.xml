@@ -30,6 +30,15 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!--
+          语音识别引擎也要单独声明,否则设置里那份「换一个引擎试试」的列表是残缺的:
+          实测这台机器上装了三个 RecognitionService,不声明只看得见两个,
+          端上那个(com.google.android.as)被包可见性过滤掉了。而识别准不准恰恰
+          取决于用哪个引擎 —— 列表少一个,机主就少一条可以试的路。
+        -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
     </queries>
 
     <application
