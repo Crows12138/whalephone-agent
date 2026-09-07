@@ -684,9 +684,9 @@ class Ball(
         if (!Voice.available(ctx)) { say("这台机器上没有语音识别,点「键盘」打字"); armRest(); return }
         if (!Voice.micGranted(ctx)) { say("还没给录音权限 —— 打开 app,设置里给一次"); armRest(); return }
         micMode(true)
-        listening(true)
-        // 它在等回答的时候,说出来的话是答案不是新任务,得让机主看得出来
-        say(AgentBus.asking?.let { "在听你的回答 · 它问:" + it } ?: "在听…")
+        // 麦克风还没开,这时候说「在听」是假的。真的开了由 onReady 通知(还会响一
+        // 声),文案和呼吸动画都等到那时候再上 —— 否则机主对着一个还没开的麦克风说话
+        say("正在打开麦克风,先别说…")
         voice = Voice(
             ctx,
             onPartial = { t -> heard(t) },
@@ -697,6 +697,11 @@ class Ball(
             },
             onError = { msg -> stopVoice(); say(msg); armRest() },
             onLevel = { rms -> level(rms) },
+            onReady = {
+                listening(true)
+                // 它在等回答的时候,说出来的话是答案不是新任务,得让机主看得出来
+                say(AgentBus.asking?.let { "在听你的回答 · 它问:" + it } ?: "在听…")
+            },
         ).also { it.start() }
     }
 

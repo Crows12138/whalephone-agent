@@ -16,6 +16,8 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 悬浮球的语音输入。用进程内的 SpeechRecognizer,不拉起识别界面 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 静音档下「可以说了」那一下用振动代替提示音。normal 权限,不弹框 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- 只在识别那几秒把悬浮窗服务升成 microphone 类型,见 OverlayService.micMode -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 

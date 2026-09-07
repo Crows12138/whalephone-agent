@@ -399,7 +399,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC); return
         }
         Ui.repaintIcon(micBtn, null, pal.onAccent, pal.bad, pal.ripple)
-        input.hint = "在听…"
+        input.hint = "正在打开麦克风…"
         voice = Voice(this,
             onPartial = { t -> input.setText(t); input.setSelection(input.text.length) },
             onFinal = { t ->
@@ -408,6 +408,7 @@ class MainActivity : Activity() {
                 else { input.setText(t); input.setSelection(t.length) }
             },
             onError = { m -> stopVoice(); toast(m) },
+            onReady = { input.hint = "在听…" },
         ).also { it.start() }
     }
 
