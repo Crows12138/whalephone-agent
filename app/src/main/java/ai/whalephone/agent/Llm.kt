@@ -36,12 +36,14 @@ class Llm(
         var last: Throwable? = null
         repeat(RETRIES) { n ->
             if (n > 0) Thread.sleep(1000L * (1 shl (n - 1)))   // 1s, 2s
+            val t0 = System.currentTimeMillis()
             try {
                 return once(messages, temperature, timeoutMs)
             } catch (t: Throwable) {
                 if (t is Permanent) throw t.cause ?: t
                 last = t
-                Log.w(TAG, "第 ${n + 1} 次调用失败(${t.message}),${if (n + 1 < RETRIES) "重试" else "放弃"}")
+                Log.w(TAG, "第 ${n + 1} 次调用失败(${t.javaClass.simpleName}: ${t.message}," +
+                    "${System.currentTimeMillis() - t0} ms),${if (n + 1 < RETRIES) "重试" else "放弃"}", t)
             }
         }
         throw last ?: RuntimeException("LLM 调用失败")
@@ -72,6 +74,17 @@ class Llm(
             connectTimeout = 15_000
             readTimeout = timeoutMs
             doOutput = true
+            // 每次都用新连接,不复用。
+            //
+            // 实测:一次传输层失败之后,这个进程里**之后每一次**调用都 Connection reset,
+            // 包括几 KB 的小请求,永不恢复;杀掉进程立刻好。同一时刻手机浏览器访问同一个
+            // 接口正常、ping 通、TCP 握手通、换一条网络也正常 —— 失效范围正好是一个进程,
+            // 而连接池是这个进程里唯一的共享网络状态。第一次失败只花 91 ms,不够做一次
+            // TLS 握手,说明它复用了池里一条已经死掉的连接。
+            //
+            // 代价是每次多一次 TLS 握手,而一次模型调用本身要几秒。拿这点时间换掉
+            // 「网络抖一下 agent 就永久瘫痪、而且看起来像模型挂了」,值。
+            setRequestProperty("Connection", "close")
             // 带图的请求有几百 KB。不定长的话 HttpURLConnection 会先在内存里攒完整个
             // 请求体再发,手机上没必要冒这个险。
             setFixedLengthStreamingMode(bytes.size)
@@ -105,6 +118,12 @@ class Llm(
     companion object {
         private const val TAG = "WPLlm"
         private const val RETRIES = 3
+
+        init {
+            // 请求头只是告诉服务端「这条别留着」,拦不住客户端**从池里取**一条旧的。
+            // 这个开关才是从源头关掉复用的那个。两个都设,不赌某一版实现的行为。
+            System.setProperty("http.keepAlive", "false")
+        }
     }
 }
 
