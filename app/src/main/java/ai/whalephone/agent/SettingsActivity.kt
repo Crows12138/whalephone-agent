@@ -30,7 +30,18 @@ class SettingsActivity : Activity() {
 
         val col = Ui.col(this).apply { setPadding(pad, pad, pad, pad) }
 
-        col.addView(Ui.text(this, "设置", 20f, pal.textMain, bold = true))
+        // 返回箭头。原来这一页只能靠系统手势退出 —— 一个页面不该只有看不见的出口,
+        // 何况这台机器上手势条被 DeX 任务栏挡了一半。
+        val back = Ui.text(this, "←", 22f, pal.textMain).apply {
+            val h = Ui.dp(this@SettingsActivity, 8f)
+            setPadding(0, h, Ui.dp(this@SettingsActivity, 14f), h)
+            setOnClickListener { finish() }
+        }
+        col.addView(Ui.row(this).apply {
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(back)
+            addView(Ui.text(this@SettingsActivity, "设置", 20f, pal.textMain, bold = true))
+        })
 
         section(col, "模型接口(OpenAI 兼容)")
         col.addView(card(
