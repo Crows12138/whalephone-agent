@@ -87,12 +87,19 @@ class Voice(
             .onFailure { Log.w(TAG, "startListening 失败", it); onError("语音识别起不来") }
     }
 
-    /** 机主选过引擎就用他选的,没选就用系统默认 */
+    /**
+     * 机主选过引擎就用他选的,没选、或者选的那个已经用不了了,就回落到系统默认。
+     *
+     * 回落这一步是必要的:引擎可能被卸载、被停用,也可能是从一个还会列出不可用
+     * 引擎的旧版本里选的。不回落的话表现是「点一下就识别失败」,而机主没有任何
+     * 线索知道该去改哪里。
+     */
     private fun create(): SpeechRecognizer {
-        val picked = Config.get(ctx, Config.KEY_VOICE_ENGINE)
-            .takeIf { it.isNotBlank() }
-            ?.let { android.content.ComponentName.unflattenFromString(it) }
-        return if (picked != null) SpeechRecognizer.createSpeechRecognizer(ctx, picked)
+        val want = Config.get(ctx, Config.KEY_VOICE_ENGINE).takeIf { it.isNotBlank() }
+        val ok = want != null && engines(ctx).any { it.first.flattenToString() == want }
+        if (want != null && !ok) Log.w(TAG, "选的引擎现在用不了,回落到系统默认:$want")
+        val cn = want?.takeIf { ok }?.let { android.content.ComponentName.unflattenFromString(it) }
+        return if (cn != null) SpeechRecognizer.createSpeechRecognizer(ctx, cn)
         else SpeechRecognizer.createSpeechRecognizer(ctx)
     }
 
@@ -114,15 +121,19 @@ class Voice(
             runCatching { SpeechRecognizer.isRecognitionAvailable(ctx) }.getOrDefault(false)
 
         /**
-         * 这台设备上注册过的识别引擎,附上人看得懂的名字。
+         * 这台设备上**本 app 真的能用**的识别引擎,附上人看得懂的名字。
          *
-         * 一台机器上通常不止一个(实测这台有三个:Google 的、端上那个、还有别的 app
-         * 带的),而它们的中文准确率差别很大 —— 差到值得让机主自己试一遍。
+         * 一台机器上通常不止一个,而它们的中文准确率差别很大 —— 差到值得让机主
+         * 挨个试。但列表必须先过一道筛:声明了绑定权限的服务只有系统能连,普通
+         * app 绑不上。实测这台机器上 Claude 那个就声明了 BIND_RECOGNITION_SERVICE,
+         * 列出来点一下只会立刻「识别失败」,而机主完全看不出为什么 ——
+         * **一个点不动的选项比没有这个选项更糟**。
          */
         fun engines(ctx: Context): List<Pair<android.content.ComponentName, String>> =
             runCatching {
                 val pm = ctx.packageManager
                 pm.queryIntentServices(Intent(android.speech.RecognitionService.SERVICE_INTERFACE), 0)
+                    .filter { it.serviceInfo.permission.isNullOrBlank() }
                     .map { ri ->
                         val si = ri.serviceInfo
                         android.content.ComponentName(si.packageName, si.name) to

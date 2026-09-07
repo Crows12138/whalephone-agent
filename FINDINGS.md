@@ -1932,6 +1932,27 @@ RecognitionService** —— 它的语音能力只在自己的输入法界面里,
 这和第九类那个 `am broadcast` 空格截断是同一类 —— 整条链上没有一处报错,
 只有结果比应有的少。
 
+## 列表还得再过一道筛:声明了绑定权限的引擎,普通 app 连不上
+
+机主试了列表里的 Claude,点一下立刻「识别失败」。查服务声明就有答案:
+
+```
+com.anthropic.claude/.bell.assist.ClaudeRecognitionService
+    filter ... permission android.permission.BIND_RECOGNITION_SERVICE
+```
+
+那是签名级权限,只有系统持有,普通 app 绑不上这个服务。Google 那两个没有这条
+声明,所以能连。
+
+这是我的设计缺陷,不是机主用错了:**我把一个注定点不动的选项列了出来**,而失败
+表现是「点一下就识别失败」,他完全看不出为什么。`queryIntentServices` 的结果里
+`serviceInfo.permission` 非空就是连不上,过滤掉即可 —— 一个点不动的选项比没有
+这个选项更糟。
+
+同时给 `create()` 加了回落:选的引擎现在用不了(卸载了、停用了、或者是从还会
+列出不可用引擎的旧版本里选的)就退回系统默认,并记一行日志。不回落的话,表现
+同样是「点一下就识别失败」,而机主没有任何线索知道该去改哪里。
+
 ## 没做的
 
 没有自己做 ASR(录音送云端识别)。DeepSeek 那把密钥上只有文本和视觉模型,

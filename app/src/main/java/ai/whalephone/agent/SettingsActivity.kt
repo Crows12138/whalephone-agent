@@ -97,7 +97,9 @@ class SettingsActivity : Activity() {
             actionRow("换一个引擎试试") { pickEngine() },
             engineLine,
             note("识别准不准由设备上装的引擎决定,不由这个 app 的参数决定 —— " +
-                "同一句话在不同引擎上差别很大,值得挨个试一遍。留「系统默认」就是不干预。"),
+                "同一句话在不同引擎上差别很大,值得挨个试一遍。留「系统默认」就是不干预。\n" +
+                "只列本 app 能连的:有些引擎(比如某些 app 自带的)声明了只有系统能绑定," +
+                "列出来也点不动,所以不列。"),
         ))
         this.engineNote = engineLine
         this.permNote = permLine
@@ -144,7 +146,7 @@ class SettingsActivity : Activity() {
         engineNote?.text = "现在用的:" + if (now.isBlank()) "系统默认"
         else Voice.engines(this).firstOrNull { it.first.flattenToString() == now }
             ?.let { "${it.second}(${it.first.packageName})" }
-            ?: "$now(已经不在这台设备上了,会退回系统默认)"
+            ?: "这个引擎现在用不了(卸载了,或者只有系统能连),已经回落到系统默认"
     }
 
     override fun onResume() {
