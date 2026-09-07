@@ -1953,6 +1953,51 @@ com.anthropic.claude/.bell.assist.ClaudeRecognitionService
 列出不可用引擎的旧版本里选的)就退回系统默认,并记一行日志。不回落的话,表现
 同样是「点一下就识别失败」,而机主没有任何线索知道该去改哪里。
 
+## 再往下查:所有引擎都连 Google,而这台手机连不上 Google
+
+机主反馈「另外两个也用不了」。这次不猜了,直接复现取错误码 —— 主界面那个麦克风
+按钮走的是同一条 Voice 代码,而它能被 uiautomator 精确定位(悬浮球得盲点,
+盲点已经害我把桌面上的微信开起来过两次,那条坑本节前面就记着)。
+
+显式选中 Google 的 tts 引擎:
+
+```
+RecognitionClient: #onError space agsa_transcription_GRPC_ERROR code 1!
+RecognitionServiceImpl: RecognitionService#onDestroy
+```
+
+`agsa` 是 Google 搜索 app,`GRPC_ERROR` 是它到 Google 服务器的调用失败。
+**不是绑定失败** —— 服务绑上了、麦克风也开了(日志里有 `recognition-mic`
+的音频路由),卡在联网那一步。
+
+再退回系统默认试一遍,一样:
+
+```
+RecognitionServiceImpl: RecognitionService#onMicrophoneOpened
+RecognitionClient: #onError space agsa_transcription_GRPC_ERROR code 14!
+RecognitionServiceImpl: Speech recognition error type GRPC_ERROR with error code 14
+```
+
+gRPC 14 = UNAVAILABLE。和前面量到的 `www.google.com:443 不通` 完全对上。
+
+于是这台机器上的账算清楚了:
+
+| 引擎 | 能不能用 |
+|---|---|
+| `com.anthropic.claude` | 声明了 BIND_RECOGNITION_SERVICE,第三方 app 绑不上 |
+| `com.google.android.tts`(= 系统默认) | 绑得上,但要连 Google —— 连不上 |
+| `com.google.android.as`(端上) | 同上 |
+| `com.google.android.googlequicksearchbox` | 同上,而且包可见性过滤后连列都列不出来 |
+| 讯飞输入法 | **根本没注册 RecognitionService**,标准 API 拿不到 |
+
+**结论:语音识别在这台手机上没有解,除非让 Google 可达。** 不是代码问题,
+也不是选错引擎的问题。机主最早那次「不是特别准确」而不是「失败」,多半是那一刻
+偶尔退到了端上模型给出一个残缺结果 —— 它本来就不稳定。
+
+真正可用的中文语音就在这台手机里(讯飞输入法),但它只活在自己的输入法界面里。
+绕法是现成的:悬浮球点「键盘」→ 讯飞弹出来 → 用讯飞自己的语音按钮说 →
+字进我们的输入框。代价是那一刻浮窗要拿一次焦点。
+
 ## 没做的
 
 没有自己做 ASR(录音送云端识别)。DeepSeek 那把密钥上只有文本和视觉模型,

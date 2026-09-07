@@ -65,6 +65,14 @@ class Voice(
 
             override fun onError(code: Int) {
                 // 把错误码翻成机主看得懂的话。原样报 "ERROR_7" 等于没报。
+                //
+                // 选过引擎的时候还要多说一句该去哪儿改。实测这台机器上显式选中
+                // Google 的引擎会硬失败(agsa_transcription_GRPC_ERROR ——
+                // 它要连 Google 的服务器,而这台机器连不上),而系统默认那条路
+                // 会退到端上模型,于是「不准」而不是「失败」。两种表现差别很大,
+                // 机主却看不出自己踩的是哪一种,除非这里点破。
+                val picked = Config.get(ctx, Config.KEY_VOICE_ENGINE).isNotBlank()
+                val hint = if (picked) "。这是你在设置里选的引擎,不行就换回「系统默认」" else ""
                 onError(
                     when (code) {
                         SpeechRecognizer.ERROR_NO_MATCH,
@@ -74,7 +82,7 @@ class Voice(
                         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "识别服务连不上网"
                         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙,稍等一下"
                         else -> "识别失败($code)"
-                    }
+                    } + hint
                 )
             }
         })
