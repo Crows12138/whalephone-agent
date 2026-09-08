@@ -107,8 +107,28 @@ class Llm(
                 val e = RuntimeException("LLM HTTP $code: ${text.take(200)}")
                 throw if (code in 400..499 && code != 429) Permanent(e) else e
             }
-            JSONObject(text).getJSONArray("choices").getJSONObject(0)
-                .getJSONObject("message").getString("content")
+            val json = JSONObject(text)
+            val choice = json.getJSONArray("choices").getJSONObject(0)
+            val msg = choice.getJSONObject("message")
+            val out = msg.optString("content").trim()
+            // 空 content 是一次**失败**,不是「模型说了句空话」。
+            //
+            // 原来它被当成正常返回值传下去:循环拿这个空串去解析 JSON、解析不了、
+            // 记一条「你输出的不是 JSON」的反馈、白花一步 —— 连着三次就撞上卡死判定。
+            // 而真相是这一次调用根本没拿到答案,该走 ask() 已经有的那套重试。
+            //
+            // 一起记下能解释「为什么是空的」的三个字段。推理模型把思考放在
+            // reasoning_content 里,思考写满了 content 就会是空的,而 HTTP 仍然是 200 ——
+            // 这一层原来在 200 的路径上什么都不记,于是「模型返回了空」和
+            // 「模型返回了看不懂的东西」在日志里长得一模一样,查不动。
+            if (out.isEmpty()) {
+                val why = "finish_reason=${choice.optString("finish_reason")}" +
+                    " usage=${json.opt("usage")}" +
+                    " reasoning_content=${msg.optString("reasoning_content").length} 字"
+                Log.w(TAG, "模型返回了空回答($why)")
+                throw RuntimeException("模型返回了空回答($why)")
+            }
+            out
         } finally {
             conn.disconnect()
         }
