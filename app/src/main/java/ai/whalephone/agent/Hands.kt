@@ -96,11 +96,7 @@ class Hands(
         if (nx !in 0..1000 || ny !in 0..1000) return "坐标要在 0 到 1000 之间,你给的是 ($nx, $ny)"
         val x = nx * metrics.widthPixels / 1000
         val y = ny * metrics.heightPixels / 1000
-        // 报坐标和读序号是同一件事的两种说法,拦截也得是同一套 —— 否则模型只要
-        // 在两者之间换着来就能绕开限制,实测它正是这么绕的。坐标要先归到格子里:
-        // 它每次报的数都差一点((500,935)、(500,930)、(500,920)),一字不差地比
-        // 等于不拦。格子取屏幕的 3%,比手指头还小,同一个按钮上的点都会落进同一格。
-        repeatGuard("tap@${nx / TAP_GRID},${ny / TAP_GRID}")?.let { return it }
+        repeatGuard(cell(nx, ny))?.let { return it }
         val moved = changed { inject("input", "-d", "$displayId", "tap", "$x", "$y") }
         return if (moved) "已在 ($nx, $ny) 点了一下"
         else "在 ($nx, $ny) 点了一下,界面没有反应 —— 那个位置多半没有能点的东西,换一处"
@@ -156,8 +152,8 @@ class Hands(
     }
 
     /**
-     * 同一处点过几次。键是「标签 + 屏幕位置」—— 序号每步重编不能当身份,
-     * 光看标签也不够(购物车里每一行都有个「删除」)。
+     * 同一处点过几次。键是[cell]:屏幕上的一格 —— 序号每步重编不能当身份,
+     * 而序号和坐标这两种下达方式必须记在同一本账上。
      */
     private val clicked = mutableMapOf<String, Int>()
 
@@ -179,6 +175,31 @@ class Hands(
      * 留两次不留一次:第一次可能真的没点中(坐标偏、页面还在动)。第二次是重试,
      * 第三次开始就是循环了。
      */
+    /**
+     * 屏幕上的哪一格。守卫的记账单位。
+     *
+     * 拦的是「同一个位置被点了几次」,不是「同一条指令下了几次」——
+     * 报坐标和读序号是同一件事的两种说法,它们必须落进**同一套坐标系**,
+     * 否则模型在两者之间换着来就绕过去了。实测它正是这么绕的:同一个
+     * 「加入购物车」按钮,看图那一步用 tap 点一次、读到序号之后又 click 点一次,
+     * 守卫两边各记一笔、都没到上限,购物车里进了两件。
+     *
+     * 格子取屏幕的 3%,比手指头还小,同一个按钮上的点都会落进同一格;
+     * 而模型报坐标每次都差一点((500,935)、(500,930)、(500,920)),
+     * 一字不差地比等于不拦。
+     *
+     * 不带元素标签。同一个标签在不同位置是不同按钮(购物车每一行都有「删除」),
+     * 坐标天然把它们分开,比标签更准;反过来列表滚动之后同一格换了个按钮会被
+     * 多拦一次 —— 那个代价只是让模型换条路,比漏拦一次重复下单便宜得多。
+     */
+    private fun cell(nx: Int, ny: Int) = "点@${nx / TAP_GRID},${ny / TAP_GRID}"
+
+    /** 像素坐标先归一化到 0-1000,再落格。序号那条路走这里进 [cell] */
+    private fun cellOfPixels(x: Int, y: Int) = cell(
+        if (metrics.widthPixels > 0) x * 1000 / metrics.widthPixels else 0,
+        if (metrics.heightPixels > 0) y * 1000 / metrics.heightPixels else 0,
+    )
+
     private fun repeatGuard(id: String): String? {
         val n = (clicked[id] ?: 0) + 1
         clicked[id] = n
@@ -222,7 +243,7 @@ class Hands(
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        repeatGuard("${e.label()}@${b.flattenToString()}")?.let { return it }
+        repeatGuard(cellOfPixels(b.centerX(), b.centerY()))?.let { return it }
         val onScreen = !b.isEmpty &&
             b.centerX() in 0 until metrics.widthPixels &&
             b.centerY() in 0 until metrics.heightPixels
