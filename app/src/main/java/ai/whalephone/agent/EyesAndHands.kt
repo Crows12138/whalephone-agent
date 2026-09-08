@@ -154,8 +154,10 @@ class EyesAndHands : AccessibilityService() {
         // 这个回调跑在主线程上,而且滚动一个信息流就是成百上千次。
         // 这里做的任何事都得是常数级的 —— 原来每次都读一遍 SharedPreferences,
         // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
+        val says = e.text.joinToString(" ") { it.toString() }.trim()
         if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${e.packageName} " +
-            AccessibilityEvent.eventTypeToString(e.eventType))
+            AccessibilityEvent.eventTypeToString(e.eventType) +
+            (if (says.isEmpty()) "" else " 说:" + says))
         if (e.displayId == Conflict.USER_DISPLAY && e.packageName?.toString() == imePkg) {
             val t = SystemClock.uptimeMillis()
             ownerImeLastAt = t

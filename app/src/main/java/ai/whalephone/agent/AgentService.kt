@@ -255,7 +255,17 @@ class AgentService : Service() {
 
         startFeedIfAsked()
 
-        val hands = Hands(probe, displayId, this) { shared?.frameJpeg() }
+        // 把送给视觉模型的那张图落盘(files/last-eyes.jpg)。视觉这条路以前是完全不可
+        // 观测的:模型说「点了 [12]」,而 [12] 在图上到底标在哪、标号有没有画歪,
+        // 谁都看不见。标号画歪的失败是静默的 —— 它会稳定地点错一个元素,
+        // 而日志里一切正常。所以这张图必须存得下来。
+        val hands = Hands(probe, displayId, this) { marks ->
+            shared?.frameJpeg(marks = marks)?.also {
+                if (marks.isNotEmpty()) runCatching {
+                    java.io.File(filesDir, "last-eyes.jpg").writeBytes(it)
+                }
+            }
+        }
         val agent = Agent(hands, llm, goal, history = doneInThisThread(), vlm = Config.vlm(this))
         agent.onStep = { s ->
             if (!stopping) {

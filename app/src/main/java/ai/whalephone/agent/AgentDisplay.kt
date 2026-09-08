@@ -83,7 +83,12 @@ class AgentDisplay private constructor(
      * 超过厂商的单图上限。模型输出的是归一化坐标,所以缩放不影响点击精度。
      */
     @Synchronized
-    fun frameJpeg(maxDim: Int = 1120, quality: Int = 80): ByteArray? {
+    fun frameJpeg(
+        maxDim: Int = 1120,
+        quality: Int = 80,
+        /** 要在图上标出来的元素:序号 -> 它在这块屏上的位置(屏幕像素) */
+        marks: List<Pair<Int, android.graphics.Rect>> = emptyList(),
+    ): ByteArray? {
         val src = captureLive() ?: return null
         return runCatching {
             // captureLive 给的位图右边带 rowStride 补白,先裁掉
@@ -92,11 +97,70 @@ class AgentDisplay private constructor(
             val scale = maxDim.toFloat() / maxOf(cut.width, cut.height)
             val out = if (scale >= 1f) cut else android.graphics.Bitmap.createScaledBitmap(
                 cut, (cut.width * scale).toInt(), (cut.height * scale).toInt(), true)
+            val marked = if (marks.isEmpty()) out else drawMarks(out, marks, minOf(scale, 1f))
             java.io.ByteArrayOutputStream().also {
-                out.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it)
+                marked.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it)
             }.toByteArray()
         }.onFailure { Log.w(TAG, "这一帧压不成 JPEG", it) }.getOrNull()
     }
+
+    /**
+     * 把元素序号画到截图上(Set-of-Mark)。
+     *
+     * 解决的是一个具体的断裂:淘宝的商品规格弹层里那些按钮**在无障碍树里有节点、
+     * 有精确坐标,却既没有 text 也没有 contentDescription** —— 元素列表里是一排
+     * 「[12] View "—" 可点」,模型看得见图上的「确定」,也看得见列表里的序号,
+     * 但两边对不上。对不上它就放弃列表去猜像素坐标,实测猜偏率约一半
+     * (点到 y=57 的屏幕顶端,而确认按钮在 y=958)。
+     *
+     * 把序号画到图上,这座桥就通了:模型看图认出「确定」,读出它旁边的号,
+     * 输出 click [号],坐标由系统从节点里取 —— 一次都不用猜。这是这个领域的
+     * 标准做法(Set-of-Mark;Mobile-Agent / SeeAct / UFO2 都走这条)。
+     *
+     * 画在**缩放之后**的图上:标号大小要按最终送给模型的那张图来定,先画后缩会把
+     * 数字缩糊,而糊掉的标号比没有标号更糟 —— 模型会读错成另一个元素的号。
+     */
+    private fun drawMarks(
+        bmp: Bitmap,
+        marks: List<Pair<Int, android.graphics.Rect>>,
+        scale: Float,
+    ): Bitmap = runCatching {
+        val out = bmp.copy(Bitmap.Config.ARGB_8888, true) ?: return bmp
+        val c = android.graphics.Canvas(out)
+        val box = android.graphics.Paint().apply {
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = 2f
+            color = 0xFFFF3B30.toInt()
+            isAntiAlias = true
+        }
+        val chip = android.graphics.Paint().apply {
+            style = android.graphics.Paint.Style.FILL
+            color = 0xFFFF3B30.toInt()
+            isAntiAlias = true
+        }
+        val num = android.graphics.Paint().apply {
+            color = android.graphics.Color.WHITE
+            textSize = 22f
+            isAntiAlias = true
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        for ((i, r) in marks) {
+            val l = r.left * scale
+            val t = r.top * scale
+            val rr = r.right * scale
+            val b = r.bottom * scale
+            if (rr - l < 4f || b - t < 4f) continue          // 太小的画上去只是噪点
+            c.drawRect(l, t, rr, b, box)
+            val label = i.toString()
+            val w = num.measureText(label) + 10f
+            // 标号贴在元素左上角内侧,贴外侧会被相邻元素盖住,也会跑出画面
+            val cx = l.coerceIn(0f, out.width - w)
+            val cy = t.coerceIn(0f, out.height - 26f)
+            c.drawRect(cx, cy, cx + w, cy + 26f, chip)
+            c.drawText(label, cx + 5f, cy + 19f, num)
+        }
+        out
+    }.onFailure { Log.w(TAG, "标号画不上去,退回原图", it) }.getOrDefault(bmp)
 
     @Synchronized
     fun capture(): Bitmap? {

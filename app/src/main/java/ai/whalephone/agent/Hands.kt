@@ -12,8 +12,9 @@ import android.view.accessibility.AccessibilityWindowInfo
  * agent 在副屏上的一双手。所有对外的操作都必须从这里走,因为
  * 「不打扰用户」这件事不是一句原则,而是每个动作各自的实现细节:
  *
- *   点击   走 performAction(ACTION_CLICK),不走 dispatchGesture ——
- *          后者是往真实触摸层里画手势,只能落在用户那块屏上。
+ *   点击   走 shell 的 `input -d <显示器> tap`,不走 dispatchGesture ——
+ *          后者是往真实触摸层里画手势,没有显示器维度,只能落在用户那块屏上。
+ *          performAction(ACTION_CLICK) 留作备选,原因见 [click]。
  *   输入   走 ACTION_SET_TEXT,不走输入法。整机只有一个 IME,
  *          实测 mDisplayIdToShowIme 恒为 0,agent 一调输入法就是抢用户的键盘。
  *   按键   走 shell 的 `input -d <显示器>`,不走 performGlobalAction ——
@@ -31,7 +32,7 @@ class Hands(
      * Hands 不该知道它的存在。开发夹具那条路(EyesAndHands 自己建的 Hands)没有
      * 自己的屏,传 null,看图那条路在那边就是不可用 —— 不可用比拿到一块别人的屏好。
      */
-    private val frame: (() -> ByteArray?)? = null,
+    private val frame: ((List<Pair<Int, android.graphics.Rect>>) -> ByteArray?)? = null,
 ) {
     private val ctxRef = ctx
     private val clipboard = ClipboardGuard(ctx)
@@ -78,8 +79,10 @@ class Hands(
     private fun inject(vararg argv: String): String = Privileged.execArgs(*argv)
 
     /** 这一帧的 base64 JPEG,拿不到返回 null */
-    fun frameB64(): String? = frame?.invoke()
-        ?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
+    /** [marks] 非空时把序号画到图上,见 AgentDisplay.drawMarks */
+    fun frameB64(marks: List<Pair<Int, android.graphics.Rect>> = emptyList()): String? =
+        frame?.invoke(marks)
+            ?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
 
     /**
      * 按归一化坐标点一下。模型看图报的是 0-1000 的相对位置,不是像素 ——
@@ -93,10 +96,12 @@ class Hands(
         if (nx !in 0..1000 || ny !in 0..1000) return "坐标要在 0 到 1000 之间,你给的是 ($nx, $ny)"
         val x = nx * metrics.widthPixels / 1000
         val y = ny * metrics.heightPixels / 1000
+        // 报坐标和读序号是同一件事的两种说法,拦截也得是同一套 —— 否则模型只要
+        // 在两者之间换着来就能绕开限制,实测它正是这么绕的。坐标要先归到格子里:
+        // 它每次报的数都差一点((500,935)、(500,930)、(500,920)),一字不差地比
+        // 等于不拦。格子取屏幕的 3%,比手指头还小,同一个按钮上的点都会落进同一格。
+        repeatGuard("tap@${nx / TAP_GRID},${ny / TAP_GRID}")?.let { return it }
         val moved = changed { inject("input", "-d", "$displayId", "tap", "$x", "$y") }
-        // 点完清掉序号那条路的记忆:这一帧的元素身份是按位置记的,而看图这一步
-        // 很可能已经把界面换掉了,留着会让下一次误判成「这个元素点不动」
-        dead.clear(); pending = null; lastId = null
         return if (moved) "已在 ($nx, $ny) 点了一下"
         else "在 ($nx, $ny) 点了一下,界面没有反应 —— 那个位置多半没有能点的东西,换一处"
     }
@@ -150,81 +155,91 @@ class Hands(
         return byEvent || byRender
     }
 
-    /** 这一步点的是谁。等 Agent 算出界面动没动,再决定要不要把它记成「点不动」 */
-    private var pending: String? = null
+    /**
+     * 同一处点过几次。键是「标签 + 屏幕位置」—— 序号每步重编不能当身份,
+     * 光看标签也不够(购物车里每一行都有个「删除」)。
+     */
+    private val clicked = mutableMapOf<String, Int>()
 
     /**
-     * 点过、而且那一下**界面什么都没发生**的元素。界面一变就整体清空。
+     * 拦住「同一处一直点」。
      *
-     * 序号每一步都会重新编号,不能当身份用,所以键取「标签 + 屏幕位置」。
-     */
-    private val dead = mutableSetOf<String>()
-
-    /**
-     * Agent 每一步算出的「上一步界面动没动」回流到这里。
+     * 这不是防呆,是防真实损失:淘宝加购成功之后**页面回到原样**,成功的唯一痕迹在
+     * 购物车里,当前这一屏上一点都看不出来。模型据此判断「没生效」,再点一次,再一次
+     * —— 实测两轮任务各把同一件商品加了 10 件(10 是淘宝每个 SKU 的上限,也就是说
+     * 它一直点到点不动为止)。
      *
-     * 这条事实 Agent 本来就在算(它要靠这个判卡死、也要写回给模型看),
-     * 只是一直没告诉 Hands。Hands 缺的恰恰就是它 —— 见下面 click 的注释。
+     * 上一版想靠「界面动没动」判断要不要拦,那条路走不通:商品详情页有轮播和懒加载,
+     * 界面每一步都在变;而加购成功反而看不出变化。这个判据在最需要它的地方恰好是反的。
+     *
+     * 所以不判断动作有没有生效,只判断**再来一次有没有意义**:同一处点了两次还没走出
+     * 这一屏,第三次不会带来任何新信息 —— 要么它其实一直在生效(那就是做了三遍),
+     * 要么它真的点不动(那就换条路)。两种情况下正确的下一步都不是再点一次。
+     *
+     * 留两次不留一次:第一次可能真的没点中(坐标偏、页面还在动)。第二次是重试,
+     * 第三次开始就是循环了。
      */
-    fun noteIdle(idled: Boolean) {
-        if (idled) pending?.let { dead += it } else dead.clear()
-        lastId = pending
-        pending = null
+    private fun repeatGuard(id: String): String? {
+        val n = (clicked[id] ?: 0) + 1
+        clicked[id] = n
+        return when {
+            n <= MAX_SAME_CLICK -> null
+            else -> "这一处你已经点过 $MAX_SAME_CLICK 次了,不再帮你点第 $n 次。" +
+                "有些操作生效之后当前这一屏根本看不出来 —— 再点一次不会带来新信息," +
+                "但如果它一直在生效,你就是把同一件事做了 $n 遍。" +
+                "下一步只能是去能查到结果的地方核对,或者换条路。"
+        }
     }
 
-    /** 紧邻的上一次点击。[dead] 在动画页面上会被频繁清空,这条兜住那种情况 */
-    private var lastId: String? = null
-
-    /** 元素的身份。序号不行(每步重编),标签也不够(一屏可能好几个同名按钮) */
-    private fun idOf(e: Perception.Element, b: Rect) = "${e.label()}@${b.flattenToString()}"
-
     /**
-     * 两级:先无障碍点击,不行才补一次真实触摸。
+     * 两级:能拿到屏内坐标就真实触摸,拿不到才退回无障碍点击。
      *
-     * 难点是**什么时候算「不行」**。`performAction` 的返回值不能信:淘宝详情页的
-     * 按钮只挂 onTouchListener,节点收下动作、返回 true,什么也不会发生。而反过来,
-     * 只要判错一次就会把一个**已经生效**的操作再做一遍 —— 实测三星计算器按 128
-     * 补出来是 122,换成购物 App 就是重复下单。所以这个判据宁可漏,不能错。
+     * 顺序是反过来的 —— 一开始是无障碍点击优先,补触摸做兜底。倒过来是因为
+     * **无障碍点击有一种验不出来的失败**:framework 里那条路是
+     * `if (isClickable()) { performClick(); return true; }`,只要 view 声明了
+     * clickable 就返回 true,`performClick()` 里到底有没有 OnClickListener 被调用
+     * 它不看。淘宝详情页的按钮只挂 onTouchListener —— 收下动作、返回 true、
+     * 什么也不做。而 `TYPE_VIEW_CLICKED` 事件在两种情况下都会发,所以从无障碍
+     * 这一侧拿不到任何能区分的信号。
      *
-     * 判据改过两次:
+     * setText 撞过同一种病(ACTION_SET_TEXT 也返回 true 但不写入),那里的解法是
+     * **回读校验**。点击没有回读:验不了,就不该选一个需要验的动作。
      *
-     * 一版用「界面动没动」直接判,漏判(界面其实变了却没测到)就补第二次触摸,
-     * 不安全。二版改成看模型的行为 —— **它又点了同一个元素**,说明上一次确实
-     * 没起作用,信号来自真实后果而不是我的检测。但二版只记了**紧邻的**上一次点击,
-     * 而提示词恰恰教模型「点不动就换个元素、换条路」:真机上模型在两次重试
-     * 「加入购物车」之间插了一次探索性点击,记录就被冲掉,兜底永远不触发 ——
-     * 提示词教的行为把兜底的触发条件正好绕开了。
+     * 中间做过一版靠事后推断的兜底:点过之后界面没动就记成「点不动」,下次直接走
+     * 触摸。它在最需要的那一页正好失效 —— 淘宝详情页有轮播和懒加载,界面每一步
+     * 都在变,「点过之后界面没动」永远不成立,一个元素都记不住。实测 19 步里点了
+     * 4 次「加入购物车」,一次真实触摸都没补上。推断机制连同它的两条记忆一起删了。
      *
-     * 现版取两者的并集:「**点过之后界面没动**」([dead],跨步数记着)**或者**
-     * 「紧邻的上一次点的就是它」([lastId],二版那条规则原样留着)。
+     * 真实触摸走 `input -d <显示器> tap`,不是 dispatchGesture —— 后者没有显示器
+     * 维度,只会画在机主那块屏上。这条路本来就是原来的兜底,在副屏上验过。
      *
-     * 两条都要,因为各自都有盲区:[dead] 靠「界面动没动」判定,而淘宝详情页有
-     * 轮播和懒加载,界面每一步都在变,集合每步都被清空 —— 实测就是这样,它一个
-     * 元素都记不住;[lastId] 则会被模型「换个元素试试」的行为冲掉。
+     * 无障碍点击留作备选,只在拿不到屏内坐标时用:节点被滚出屏外、或者 bounds 是空的。
+     * 那种情况下触摸无处可落,无障碍点击是唯一还有可能生效的。
      *
-     * 并且认定「点不动」之后**不再白点一次无障碍**,直接走真实触摸。原来那版在
-     * again 成立时是无障碍点击 + 真实触摸两下都做,那正是「重复下单」的来源;
-     * 现在任何一步都只落一次动作。
+     * 任何一步都只落一个动作,不会两下都做 —— 「重复下单」的来源是旧版在兜底
+     * 成立时无障碍点击和真实触摸各做一次。
      */
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        val id = idOf(e, b)
-        val known = id in dead || id == lastId
-        pending = id
+        repeatGuard("${e.label()}@${b.flattenToString()}")?.let { return it }
+        val onScreen = !b.isEmpty &&
+            b.centerX() in 0 until metrics.widthPixels &&
+            b.centerY() in 0 until metrics.heightPixels
 
-        if (!known) {
+        if (!onScreen) {
+            // 触摸点落不到这块屏上。无障碍点击不需要坐标,这时候它是唯一的路。
             val ok = Actions.click(e)
             Thread.sleep(SETTLE_MS)
-            if (ok) return "已点击 [$i] ${e.label()}"
+            return if (ok) "已点击 [$i] ${e.label()}(它不在屏幕可见范围内,走的无障碍点击)"
+            else "点不动 [$i] ${e.label()}:它不在屏幕可见范围内,先把它滚到屏幕里再点"
         }
 
-        if (b.isEmpty) return "点不动 [$i],也拿不到它的位置"
         val moved = changed {
             inject("input", "-d", "$displayId", "tap", "${b.centerX()}", "${b.centerY()}")
         }
-        return if (moved) "已点击 [$i] ${e.label()}(无障碍点击对它无效,改用真实触摸)"
-        else "点了 [$i] ${e.label()},界面仍然没有反应 —— 这个元素点不动,换一个"
+        return if (moved) "已点击 [$i] ${e.label()}"
+        else "点了 [$i] ${e.label()},界面没有反应 —— 这一处多半点不动,换个元素或换条路"
     }
 
     fun longClick(i: Int): String {
@@ -446,6 +461,12 @@ class Hands(
         private const val LAUNCH_TIMEOUT_MS = 25_000L
         /** 动作之后等界面反应的时间。太短会把「慢」误判成「没生效」。 */
         private const val SETTLE_MS = 500L
+
+        /** 同一处最多点几次。第一次可能真没点中,第二次是重试,第三次开始是循环 */
+        private const val MAX_SAME_CLICK = 2
+
+        /** 判断「还是刚才那个位置」的格子大小,单位是归一化坐标(千分之) */
+        private const val TAP_GRID = 30
 
         /**
          * 纵深防御。argv 已经堵死了 shell 注入,这两条再挡住「拼出一个合法但不是

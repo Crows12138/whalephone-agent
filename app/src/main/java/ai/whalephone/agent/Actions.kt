@@ -11,7 +11,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 /**
  * 操作层。三条硬规则,都是为了「不打扰用户」:
  *
- *  1. 只用 performAction 操作节点,绝不用 dispatchGesture —— 后者会把手势画在真实屏幕上。
+ *  1. 绝不用 dispatchGesture —— 它没有显示器维度,会把手势画在机主那块屏上。
+ *     带显示器维度的真实触摸走 shell(`input -d <id> tap`),由 Hands 负责。
  *  2. 文字用 ACTION_SET_TEXT 直接写进节点,绝不走输入法 —— 实测 mDisplayIdToShowIme 恒为 0,
  *     虚拟屏的键盘会弹到用户脸上。
  *  3. 绝不用 performGlobalAction(返回/主页/最近任务)—— 见下方说明。
@@ -33,6 +34,13 @@ object Actions {
     fun globalActionIsUnsafe(): Nothing =
         error("performGlobalAction 没有 displayId 维度,会作用到用户那块屏,禁止使用")
 
+    /**
+     * 备选的点击路径,只在拿不到屏内坐标时用(见 [Hands.click])。
+     *
+     * 它有一种验不出来的失败:framework 那条路是 `if (isClickable()) { performClick(); return true; }`,
+     * 返回值只反映 view 声明了 clickable,不反映有没有 OnClickListener 被调用。
+     * 淘宝详情页的按钮只挂 onTouchListener,这里就会「成功地什么也没做」。
+     */
     fun click(el: Perception.Element): Boolean {
         val target = el.node.findClickableSelfOrAncestor() ?: el.node
         val ok = target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
