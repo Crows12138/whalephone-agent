@@ -294,6 +294,7 @@ class ShellBridge : IShellBridge.Stub {
         const val OWN_DISPLAY_GROUP          = 1 shl 11
         const val ALWAYS_UNLOCKED            = 1 shl 12
         const val OWN_FOCUS                  = 1 shl 14
+        const val STEAL_TOP_FOCUS_DISABLED   = 1 shl 16
 
         /**
          * agent 屏的标志位组合,每一位都对应一个实测出来的冲突:
@@ -301,13 +302,18 @@ class ShellBridge : IShellBridge.Stub {
          *  TRUSTED                  必需,否则第三方 App 启不上来
          *  OWN_CONTENT_ONLY         不镜像主屏,用户屏上什么都不会多出来
          *  SHOULD_SHOW_SYSTEM_DECORATIONS  这块屏有自己的状态栏/导航,才能有自己的 IME 策略
-         *  OWN_FOCUS                ← 焦点冲突的结构性解法:这块屏自己维护焦点,
-         *                             agent 点什么都不会把全局焦点指针从用户那块屏拽走
+         *  OWN_FOCUS                这块屏自己维护焦点。**但它不够** —— 实测副屏上
+         *                             的窗口照样会成为全局的顶层焦点屏,进而成为输入法的
+         *                             焦点目标,于是这块屏的 IME 策略(HIDE)被拿去裁决
+         *                             整机那唯一一个输入法,机主的键盘就被摁下去了
+         *                             (见 FINDINGS「机主唤不起输入法」)
+         *  STEAL_TOP_FOCUS_DISABLED ← 补的正是上面那一半:禁止这块屏抢走顶层焦点。
+         *                             必须和 OWN_FOCUS 一起用,单独给没有意义
          *  OWN_DISPLAY_GROUP        ALWAYS_UNLOCKED 的前置条件
          *  ALWAYS_UNLOCKED          用户锁屏后 agent 继续干活,而不是只能看见 keyguard
          */
         const val AGENT_DISPLAY_FLAGS =
             TRUSTED or OWN_CONTENT_ONLY or SHOULD_SHOW_SYSTEM_DECORATIONS or
-            OWN_FOCUS or OWN_DISPLAY_GROUP or ALWAYS_UNLOCKED
+            OWN_FOCUS or STEAL_TOP_FOCUS_DISABLED or OWN_DISPLAY_GROUP or ALWAYS_UNLOCKED
     }
 }

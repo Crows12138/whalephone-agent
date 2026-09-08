@@ -151,7 +151,11 @@ object Privileged {
     fun createAgentDisplayBestEffort(w: Int, h: Int, dpi: Int, surface: Surface): Pair<Int, Int> {
         val ladder = listOf(
             ShellBridge.AGENT_DISPLAY_FLAGS,
-            ShellBridge.AGENT_DISPLAY_FLAGS and (ShellBridge.ALWAYS_UNLOCKED or ShellBridge.OWN_DISPLAY_GROUP).inv(),
+            // STEAL_TOP_FOCUS_DISABLED 是 Android 15 才有的,单独退一级 ——
+            // 它只影响「会不会打扰机主的键盘」,不影响 agent 能不能干活,
+            // 拿不到就退回去继续跑,而不是整块屏造不出来
+            ShellBridge.AGENT_DISPLAY_FLAGS and ShellBridge.STEAL_TOP_FOCUS_DISABLED.inv(),
+            ShellBridge.AGENT_DISPLAY_FLAGS and (ShellBridge.ALWAYS_UNLOCKED or ShellBridge.OWN_DISPLAY_GROUP or ShellBridge.STEAL_TOP_FOCUS_DISABLED).inv(),
             ShellBridge.TRUSTED or ShellBridge.OWN_CONTENT_ONLY or
                 ShellBridge.SHOULD_SHOW_SYSTEM_DECORATIONS or ShellBridge.OWN_FOCUS,
             ShellBridge.TRUSTED or ShellBridge.OWN_CONTENT_ONLY or

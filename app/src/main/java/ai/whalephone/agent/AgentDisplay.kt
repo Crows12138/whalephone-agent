@@ -36,6 +36,7 @@ class AgentDisplay private constructor(
         // 原生 Android 16 上实测有效:机主的屏和副屏能同时各自持有焦点窗口,
         // 机主的输入法不受影响。三星那台机器上没观察到同样的效果,原因未查。
         if (flags and ShellBridge.OWN_FOCUS != 0) add("独立焦点")
+        if (flags and ShellBridge.STEAL_TOP_FOCUS_DISABLED != 0) add("不抢顶层焦点")
         if (flags and ShellBridge.ALWAYS_UNLOCKED != 0) add("锁屏仍可用")
         if (flags and ShellBridge.OWN_CONTENT_ONLY != 0) add("不镜像主屏")
         if (flags and ShellBridge.SHOULD_SHOW_SYSTEM_DECORATIONS != 0) add("有独立系统装饰")
