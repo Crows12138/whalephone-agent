@@ -130,6 +130,16 @@ object Privileged {
     fun setImePolicy(displayId: Int, policy: Int): Int =
         runCatching { bridge?.setImePolicy(displayId, policy) ?: -99 }.getOrDefault(-99)
 
+    /**
+     * 把副屏上那个任务搬到机主眼前(主屏),交给他自己接手。
+     *
+     * 返回一句给人看的话,"OK" 开头才算成。调用方**必须**看这个返回值再决定停不停
+     * agent —— 搬不动还把 agent 停了,机主既没拿到界面,任务也断了。
+     */
+    fun moveTopTaskToMain(fromDisplayId: Int): String =
+        runCatching { bridge?.moveTopTask(fromDisplayId, 0) ?: "MOVE_FAIL: 特权桥没连上" }
+            .getOrElse { "MOVE_FAIL: ${it.message}" }
+
     fun createAgentDisplay(w: Int, h: Int, dpi: Int, surface: Surface): Int =
         bridge?.createDisplay(w, h, dpi, surface, ShellBridge.AGENT_DISPLAY_FLAGS) ?: -1
 

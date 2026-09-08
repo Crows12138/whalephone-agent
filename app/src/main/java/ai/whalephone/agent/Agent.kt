@@ -83,6 +83,15 @@ class Agent(
         var n = 0
         var rounds = 0
         while (n < maxSteps && rounds < maxSteps * 4) {
+            // 机主接管了,这件事已经不归 agent 管 —— 这里退出,不是在 execute 里挡。
+            //
+            // 只挡动作层是不够的:动作被拒之后返回的是一句给模型看的话,循环照转,
+            // 每转一轮就是一次模型调用,最后还会以「界面连续 4 步没有变化,判定卡住了」
+            // 收场 —— 机主明明是自己接管的,却看到一张红色的「没做成」说 agent 卡住。
+            // 实测过一次,4 轮空转。挡动作是为了不让那一下点到机主屏幕上,
+            // 结束循环是为了不撒谎、不烧钱。两件事,两处。
+            if (Conflict.handingOver())
+                return Outcome(true, "你接管了,它做到第 ${trace.size} 步就停手了", trace.toList())
             rounds++
             n++
             // 接下来是拍快照 + 等模型返回,agent 这几秒什么都不做。
@@ -265,6 +274,10 @@ class Agent(
     }
 
     private fun execute(name: String, a: JSONObject): String {
+        // 机主按了接管:这件事已经不归 agent 管了,一个动作都不许再出手。
+        // 判在最前面 —— 后面那些让路逻辑动辄等几十秒,等完再判就晚了。
+        if (Conflict.handingOver()) return "机主接管了这件事,agent 不再动手"
+
         // 机主在打字就先让路,**每个动作都让**,不按动作类型区分。
         //
         // 试过按类型区分,退回来了。当时的依据是逐个操作归因表:无障碍动作不动焦点
@@ -296,7 +309,8 @@ class Agent(
             return "机主刚才在打字,agent 让了 ${waited / 1000} 秒没动手。" +
                 "这段时间界面可能已经变了,上面这一帧是最新的,重新看一眼再决定"
         }
-        val r = doExecute(name, a)
+        // 登记在飞:接管那一侧要等这一段落地才敢搬任务,见 Conflict.beginHandover
+        val r = Conflict.whileActing { doExecute(name, a) }
         Thread.sleep(600)   // 留出界面响应时间,否则下一帧快照拍到的是旧界面
         return r
     }

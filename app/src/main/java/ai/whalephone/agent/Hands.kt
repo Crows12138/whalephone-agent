@@ -464,6 +464,55 @@ class Hands(
 /** 资源竞争的处理集中在这里,每一条都对应一次真机上量到的冲突 */
 object Conflict {
 
+    // ---- 机主接管:最后一种资源冲突,也是最彻底的一种 ----
+
+    /**
+     * 机主按了「接管」。
+     *
+     * 要解决的竞态是这个:接管要做两件事 —— 把任务搬到主屏、让 agent 停手。这两件事
+     * 互不知情,于是不管搬得多快、停得多早,总存在一个瞬间 **agent 的动作落在了已经
+     * 搬到机主屏幕上的界面里**。那正是这个项目从头到尾在防的事。把窗口缩小是治标,
+     * 因为窗口的存在与否和它有多宽无关。
+     *
+     * 所以不新造一套同步,而是借 agent 本来就有的那道闸门:每个动作出手之前都要过
+     * [yieldWhileOwnerTypes]。给这道闸门加一个「已经交接」的状态 —— 一旦置位,
+     * 闸门不再放行任何动作;接管那一侧则**等在飞的动作落地**之后才去搬。
+     *
+     * [inFlight] 只在动作真正执行的那一段里非零,所以「等它归零」等的是最短的那一段,
+     * 不是整轮循环(那里面有模型调用,可能几十秒)。
+     */
+    @Volatile private var handover = false
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 闸门:置位之后一个动作都不放 */
+    fun handingOver() = handover
+
+    /** 动作执行的那一段。接管等的就是这一段落地 */
+    fun <T> whileActing(block: () -> T): T {
+        inFlight.incrementAndGet()
+        try { return block() } finally { inFlight.decrementAndGet() }
+    }
+
+    /**
+     * 关闸,然后等在飞的动作落地。返回 true 表示确认此刻一个动作都没在飞。
+     *
+     * 等不到也照样让调用方往下走:等不到意味着 agent 卡在某个动作里,而**机主最想
+     * 接管的恰恰就是这种时候**。此时闸门已经关上,那个动作是最后一个,而且它操作的
+     * 是同一个 App 里同一个按钮 —— 落到主屏上也是落在机主刚要过来接手的那个界面里,
+     * 不是他别的东西。这个残余风险是知情接受的,不是没看见。
+     */
+    fun beginHandover(waitMs: Long = 3000): Boolean {
+        handover = true
+        val end = android.os.SystemClock.elapsedRealtime() + waitMs
+        while (inFlight.get() > 0 && android.os.SystemClock.elapsedRealtime() < end)
+            runCatching { Thread.sleep(50) }.getOrElse { return false }
+        return inFlight.get() == 0
+    }
+
+    /** 开闸。两处用:接管没搬成(agent 接着跑)、以及新任务开工前的复位 */
+    fun clearHandover() { handover = false }
+
+
     /**
      * 用户此刻在主屏上用的是哪个 App。
      *

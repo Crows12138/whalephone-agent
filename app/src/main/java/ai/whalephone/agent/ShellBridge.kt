@@ -145,6 +145,85 @@ class ShellBridge : IShellBridge.Stub {
         after
     }.getOrElse { Log.w(TAG, "设不了副屏 $displayId 的输入法策略", it); POLICY_UNREADABLE }
 
+    /**
+     * 把副屏上最上面那个任务搬到主屏,交给机主。
+     *
+     * 三步,每步都可能不成,所以每步都单独报:
+     *
+     * 1. **找任务** —— 读 `dumpsys activity activities` 里那块屏的段落。副屏上常驻
+     *    一个 DeX 副屏桌面(SecondaryLauncher),它不是任务,要跳过;跳过之后什么都
+     *    不剩,说明 agent 还没打开任何 App,那就没有可接管的东西。
+     * 2. **搬** —— `moveRootTaskToDisplay` 是隐藏 API,不同版本上有没有、叫不叫这个
+     *    名字都不保证,所以拿不到就退到 `am start`。退化路有它自己的毛病(见 AIDL 的
+     *    说明),但有总比没有强,而且日志里说清走的是哪条。
+     * 不需要额外「提到前台」。一度加过 `ActivityManager.moveTaskToFront`,删掉了:
+     * 它在这个进程里必然抛 `SecurityException: package=android does not belong to uid=2000`
+     * (和 DisplayManager 那处同一个原因,见 ShellContext 的说明),而且**它本来就是多余的** ——
+     * reparent 走的是 `TaskDisplayArea.addChild`,系统日志里紧跟着就是
+     * `updateTopResumedActivityIfNeeded`,置顶是这条路径自带的,不是运气。
+     */
+    override fun moveTopTask(fromDisplayId: Int, toDisplayId: Int): String {
+        val t = topTaskOn(fromDisplayId)
+            ?: return "MOVE_FAIL: 副屏上还没有打开任何 App"
+        val (taskId, component) = t
+
+        val byApi = runCatching {
+            val binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String::class.java)
+                .invoke(null, "activity_task") as android.os.IBinder
+            val atm = Class.forName("android.app.IActivityTaskManager${'$'}Stub")
+                .getMethod("asInterface", android.os.IBinder::class.java)
+                .invoke(null, binder)!!
+            atm.javaClass.getMethod("moveRootTaskToDisplay",
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                .invoke(atm, taskId, toDisplayId)
+        }
+
+        val how: String
+        if (byApi.isSuccess) {
+            how = "moveRootTaskToDisplay"
+        } else {
+            Log.w(TAG, "moveRootTaskToDisplay 走不通,退到 am start", byApi.exceptionOrNull())
+            val out = execArgs(mutableListOf(
+                "am", "start", "--display", toDisplayId.toString(),
+                "--windowingMode", "1", "-n", component))
+            // am 搬成功时打印的恰好是「Activity not started」—— 那句话是说没有新建
+            // Activity,不是说没搬动。真正的失败长的是 Error: / Exception 那样。
+            if (out.contains("Error") || out.contains("Exception"))
+                return "MOVE_FAIL: ${out.trim().take(120)}"
+            how = "am start(退化)"
+        }
+
+        Log.i(TAG, "任务 t$taskId ($component) $fromDisplayId -> $toDisplayId,走的是 $how")
+        return "OK $component"
+    }
+
+    /**
+     * 那块屏最上面那个**可以交给机主**的任务。
+     *
+     * 只认 `Display #<id>` 到下一个 `Display #` 之间那一段 —— 整份 dumpsys 里同一个
+     * ActivityRecord 会出现在好几个地方(历史、最近任务、焦点),不切段落会读到别的屏上的东西。
+     */
+    private fun topTaskOn(displayId: Int): Pair<Int, String>? = runCatching {
+        val dump = execArgs(mutableListOf("dumpsys", "activity", "activities"))
+        // 不用正则切段:"Display #11" 会命中 "Display #113",而写 word boundary
+        // 又要在原始字符串里塞转义。dumpsys 的行本来就长成 "Display #113 (",
+        // 直接按这个字面量找起点,下一个 "Display #" 就是终点。
+        val from = dump.indexOf("Display #$displayId (")
+        if (from < 0) return@runCatching null   // 表达式体函数里不能裸 return
+        val next = dump.indexOf("Display #", from + 1)
+        val block = dump.substring(from, if (next < 0) dump.length else next)
+        Regex("""ActivityRecord\{[0-9a-f]+ u\d+ ([^ /]+)/([^ ]+) t(\d+)\}""")
+            .findAll(block)
+            .map { Triple(it.groupValues[1], it.groupValues[2], it.groupValues[3].toInt()) }
+            .firstOrNull { (pkg, act, _) -> !isHome(pkg, act) }
+            ?.let { (pkg, act, id) -> id to "$pkg/$act" }
+    }.getOrElse { Log.w(TAG, "读不出副屏 $displayId 上的任务", it); null }
+
+    /** 副屏桌面不是任务,搬它到主屏没有任何意义 */
+    private fun isHome(pkg: String, act: String) =
+        act.contains("Launcher") || act.contains("Home") || pkg.endsWith(".launcher")
+
     override fun releaseDisplay(displayId: Int) {
         synchronized(displays) { displays.remove(displayId) }?.release()
     }

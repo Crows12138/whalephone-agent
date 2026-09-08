@@ -40,4 +40,17 @@ interface IShellBridge {
      * 单独暴露出来是因为三个取值各有各的代价,只能在真机上量,不能纸上定。
      */
     int setImePolicy(int displayId, int policy) = 6;
+
+    /**
+     * 把 fromDisplay 上最上面那个任务搬到 toDisplay,让机主自己接手。
+     *
+     * 搬的是**任务**不是重新启动:走 IActivityTaskManager.moveRootTaskToDisplay,
+     * Activity 实例和返回栈原样跟过去。退化到 `am start -n <顶层Activity>` 的话,
+     * 顶层 Activity 不是任务根的时候会另起一个新实例,机主接到的是一张白纸。
+     * 所以 API 那条是主路,shell 那条只是兜底。
+     *
+     * 返回一句给人看的话:成功以 "OK" 开头,失败以 "MOVE_FAIL" 开头 ——
+     * 调用方要靠它决定停不停 agent,搬不动就绝不能停。
+     */
+    String moveTopTask(int fromDisplayId, int toDisplayId) = 7;
 }

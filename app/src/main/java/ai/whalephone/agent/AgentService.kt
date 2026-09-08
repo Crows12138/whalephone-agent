@@ -62,6 +62,8 @@ class AgentService : Service() {
 
         if (intent?.action == ACT_ANSWER) return takeAnswer(intent)
 
+        if (intent?.action == ACT_TAKEOVER) return takeover()
+
         val goal = intent?.getStringExtra(EXTRA_GOAL).orEmpty()
         if (goal.isBlank()) { stopSelf(); return START_NOT_STICKY }
 
@@ -71,6 +73,7 @@ class AgentService : Service() {
         AgentBus.post(AgentBus.Kind.GOAL, goal)
         AgentBus.setRunning(true)
         stopping = false
+        Conflict.clearHandover()       // 上一轮可能是被接管掐掉的,闸门不复位新任务一步都走不了
         idle.removeCallbacks(settle)   // 保温期里追进来的任务:摊子还在,直接开工
         worker = thread(name = "wp-agent") { runTask(goal) }
         return START_STICKY
@@ -93,6 +96,44 @@ class AgentService : Service() {
         if (text.isNotEmpty()) note("这个问题已经过期了,没人在等这句回答")
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
+        return START_NOT_STICKY
+    }
+
+    /**
+     * 机主接管:把副屏上这个任务搬到他眼前,agent 就地停手。
+     *
+     * **顺序不能反。** stop() 里会销毁副屏,而副屏一销毁,上面的 task 跟着一起消失
+     * (那是刻意的,见 stop 的说明)—— 先停再搬就没东西可搬了。
+     *
+     * **搬不动就绝不停 agent。** 那样机主两头落空:界面没到眼前,任务还断了。
+     * 所以这里唯一的判据是 moveTopTaskToMain 的返回值,不是「我发出去了」。
+     *
+     * 搬过去之后不做恢复:任务停在第几步、做到哪一屏,都留在对话记录里给机主看。
+     * 「接管完再还回去接着跑」是另一件事 —— 它要求 agent 能从任意一屏重新接上,
+     * 那是感知层的能力,不是这个按钮的事。
+     */
+    private fun takeover(): Int {
+        startForeground(NOTI_ID, notify("手机助理", "正在把任务交到你手上"))
+        val d = shared
+        if (d == null) {
+            note("副屏还没建起来,没有可接管的任务")
+            stopForeground(STOP_FOREGROUND_DETACH)
+            if (worker?.isAlive != true) stopSelf()
+            return START_NOT_STICKY
+        }
+        // 先关闸、等在飞的动作落地,再搬 —— 顺序反了就会有一下点在机主屏幕上,
+        // 理由写在 Conflict.beginHandover
+        if (!Conflict.beginHandover())
+            Log.w(TAG, "接管:等了 3 秒还有动作没落地,照搬(它多半卡住了,而卡住正是机主要接管的原因)")
+
+        val r = Privileged.moveTopTaskToMain(d.displayId)
+        if (!r.startsWith("OK")) {
+            Conflict.clearHandover()   // 没搬成就把闸门重新打开,agent 接着跑
+            note("接管没成功,agent 继续跑着 —— $r")
+            return START_STICKY
+        }
+        AgentBus.post(AgentBus.Kind.NOTE, "你接管了,它停手了", r.removePrefix("OK").trim())
+        stop()
         return START_NOT_STICKY
     }
 
@@ -455,6 +496,7 @@ class AgentService : Service() {
         const val DISPLAY_WAIT_MS = 180_000L
         const val ACT_STOP = "ai.whalephone.agent.STOP"
         const val ACT_ANSWER = "ai.whalephone.agent.ANSWER"
+        const val ACT_TAKEOVER = "ai.whalephone.agent.TAKEOVER"
         const val EXTRA_TEXT = "text"
         /** 通知里直接回复用的 key */
         const val KEY_REPLY = "reply"
@@ -505,6 +547,10 @@ class AgentService : Service() {
             Intent(ctx, AgentService::class.java)
                 .setAction(ACT_ANSWER)
                 .putExtra(EXTRA_TEXT, text))
+
+        /** 机主要自己接手:把副屏上那个任务搬到主屏,agent 停手 */
+        fun takeover(ctx: Context): Boolean = launch(ctx,
+            Intent(ctx, AgentService::class.java).setAction(ACT_TAKEOVER))
 
         /** 长时任务的一轮,由 Watch 的闹钟触发 */
         fun startRound(ctx: Context, goal: String) = start(ctx, goal)

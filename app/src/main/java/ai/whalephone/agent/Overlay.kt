@@ -45,6 +45,9 @@ import kotlin.math.min
  *   2. 都是机主自己开的,而且随时能关。默认全关。
  *   3. 取景窗只读画面,不接受任何对副屏的操作 —— 它是个窗口,不是遥控器。
  *      副屏上的操作只由 agent 做,机主要插手就直接说话/打字下任务。
+ *      **「接管」是这条规矩的边界而不是例外**:它不替机主点副屏,它把任务从副屏
+ *      搬到主屏、让 agent 停手。做完之后副屏上什么都不剩,机主面对的是一个普通的
+ *      前台 App —— 不存在「两个人同时操作同一块屏」的那一刻,而那正是规矩三要防的。
  *
  * 服务是前台服务,因为悬浮球的意义就是「不打开 app 也在」。通知走最低优先级,
  * 且点它就能关掉悬浮球 —— 常驻的东西必须有一个显而易见的出口。
@@ -317,7 +320,9 @@ abstract class FloatWindow(protected val ctx: Context, private val wm: WindowMan
  * 不新开一路采集,也就不多占一份内存。取帧走 captureLive:复用同一张位图,
  * 每帧 10 MB 的分配换成 10 MB 的拷贝(见那边的说明)。
  *
- * 只读。窗口上没有任何能操作副屏的东西,理由写在 OverlayService 顶部。
+ * **不是遥控器。** 窗口上没有任何能操作副屏的东西 —— 理由写在 OverlayService 顶部。
+ * 唯一的按钮是「接管」,而它做的事恰恰相反:把那个任务从副屏搬到机主眼前,然后让
+ * agent 停手。它不是「替机主点副屏」,是「副屏这件事到此为止,剩下你自己来」。
  */
 class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
 
@@ -325,6 +330,7 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var canvasView: Frame
     private lateinit var hint: TextView
+    private lateinit var takeBtn: TextView
 
     private var full = -1
     private var hasDisplay: Boolean? = null
@@ -339,6 +345,9 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
                 hasDisplay = now
                 hint.visibility = if (now) View.GONE else View.VISIBLE
                 canvasView.visibility = if (now) View.VISIBLE else View.GONE
+                // 没有副屏就没有可接管的东西,按钮跟着画面一起收起来
+                takeBtn.visibility = if (now) View.VISIBLE else View.GONE
+                if (now) takeBtn.text = "接管"
                 // 没有副屏的时候把窗口缩成一条提示,别在机主屏幕上占一大块空白
                 lp.height = if (now) full else WindowManager.LayoutParams.WRAP_CONTENT
                 apply()
@@ -369,10 +378,26 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
             }
         }
 
+        // 「接管」= 把这个任务搬到机主眼前 + agent 停手。搬成没搬成由服务那边判,
+        // 这里只负责发出去和给一句「在办」—— 搬成了副屏就没了,窗口自己会缩成提示条。
+        takeBtn = Ui.text(ctx, "接管", 11.5f, pal.accent, bold = true).apply {
+            setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 4f), Ui.dp(ctx, 10f), Ui.dp(ctx, 4f))
+            background = Ui.tappable(
+                Ui.round(Color.TRANSPARENT, Ui.dp(ctx, 12f), pal.accent, Ui.dp(ctx, 1f)),
+                pal.ripple)
+            isClickable = true
+            visibility = View.GONE
+            setOnClickListener {
+                text = "交接中…"
+                AgentService.takeover(ctx)
+            }
+        }
+
         val bar = Ui.row(ctx).apply {
             setPadding(Ui.dp(ctx, 10f), Ui.dp(ctx, 5f), Ui.dp(ctx, 4f), Ui.dp(ctx, 5f))
             addView(Ui.text(ctx, "副屏", 12f, pal.textSub, bold = true), Ui.lp(Ui.WRAP, Ui.WRAP))
             addView(View(ctx), Ui.lp(0, 1, 1f))
+            addView(takeBtn, Ui.lp(Ui.WRAP, Ui.WRAP))
             addView(Ui.iconBtn(ctx, R.drawable.ic_close, pal.textSub, Color.TRANSPARENT,
                 pal.ripple, padDp = 7f).apply {
                 setOnClickListener { OverlayService.setScreen(ctx, false) }
