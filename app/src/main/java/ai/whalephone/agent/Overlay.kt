@@ -347,12 +347,25 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
                 canvasView.visibility = if (now) View.VISIBLE else View.GONE
                 // 没有副屏就没有可接管的东西,按钮跟着画面一起收起来
                 takeBtn.visibility = if (now) View.VISIBLE else View.GONE
-                if (now) takeBtn.text = "接管"
                 // 没有副屏的时候把窗口缩成一条提示,别在机主屏幕上占一大块空白
                 lp.height = if (now) full else WindowManager.LayoutParams.WRAP_CONTENT
                 apply()
             }
-            if (now) canvasView.invalidate()
+            // 文案每帧从事实推出来,不由点击那一下写死。
+            //
+            // 原来是点的时候把它改成「交接中…」,再指望上面那个 if 把它改回来 ——
+            // 而那个 if 只在「有没有副屏」跳变时才进得去。接管失败时副屏根本没变,
+            // 于是按钮永远停在「交接中…」。真机上撞到了。
+            //
+            // 病根不是少了一个「失败也重置」的分支,是**文案被当成状态用而这个状态
+            // 没有归属**:谁改回去没有定义。而「正在交接」这件事本来就有归属 ——
+            // Conflict.handingOver(),接管失败时 clearHandover() 会清掉它。
+            // 按钮读它就行,不必自己记。
+            if (now) {
+                val want = if (Conflict.handingOver()) "交接中…" else "接管"
+                if (takeBtn.text != want) takeBtn.text = want
+                canvasView.invalidate()
+            }
             handler.postDelayed(this, (1000L / fps))
         }
     }
@@ -387,10 +400,9 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
                 pal.ripple)
             isClickable = true
             visibility = View.GONE
-            setOnClickListener {
-                text = "交接中…"
-                AgentService.takeover(ctx)
-            }
+            // 这里不动文案:交接有没有真的开始由 Conflict 说了算,pump 每帧读它。
+            // 点了之后最多 200 毫秒(5 帧/秒)才变字,换来的是「它说交接中就真的在交接」。
+            setOnClickListener { AgentService.takeover(ctx) }
         }
 
         val bar = Ui.row(ctx).apply {
