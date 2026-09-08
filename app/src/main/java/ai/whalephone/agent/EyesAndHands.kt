@@ -149,15 +149,37 @@ class EyesAndHands : AccessibilityService() {
     fun ownerImeEventsSince(since: Long): Int =
         synchronized(imeEvt) { imeEvt.count { it > since } }
 
+    /**
+     * 事件回调。**里面一件正事都不做,全是观测** —— 记时刻、写环形缓冲、打日志。
+     *
+     * 所以它整个兜在 try/catch 里。它跑在系统主线程的回调上,抛出去就是
+     * FATAL EXCEPTION:进程当场被杀,副屏跟着没,正在做的任务连同上下文全丢。
+     * 真机上就这么炸过一次 —— 一行日志里 `e.text` 的某个元素是 null,
+     * 一个 toString() 打死了整个 agent。
+     *
+     * 观测失灵的正确后果是「这条信号哑了」,而判据对信号哑掉本来就有保守退路
+     * (见 Conflict.signalArmed);而不是把它观测的那个东西一起带走。
+     *
+     * 用 try/catch 不用 runCatching:这里每秒进来上千次,不该有 Result 的分配。
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
+        try { note(e) } catch (t: Throwable) { Log.w(TAG, "记这条事件时出错,跳过", t) }
+    }
+
+    private fun note(e: AccessibilityEvent) {
         // 这个回调跑在主线程上,而且滚动一个信息流就是成百上千次。
         // 这里做的任何事都得是常数级的 —— 原来每次都读一遍 SharedPreferences,
         // 改成只读内存里的开关(CONFIG 广播来的时候更新)。
-        val says = e.text.joinToString(" ") { it.toString() }.trim()
-        if (trace) Log.i(TAG, "evt 屏=${e.displayId} ${e.packageName} " +
-            AccessibilityEvent.eventTypeToString(e.eventType) +
-            (if (says.isEmpty()) "" else " 说:" + says))
+        if (trace) {
+            // 拼在 if 里面:关着 trace 的时候一条日志都不打,却为它遍历列表、
+            // 分配字符串,正是上面那条「常数级」规矩要挡的事。
+            // filterNotNull 不是防御性写法 —— getText() 的元素**确实**可以是 null。
+            val says = e.text.filterNotNull().joinToString(" ").trim()
+            Log.i(TAG, "evt 屏=${e.displayId} ${e.packageName} " +
+                AccessibilityEvent.eventTypeToString(e.eventType) +
+                (if (says.isEmpty()) "" else " 说:" + says))
+        }
         if (e.displayId == Conflict.USER_DISPLAY && e.packageName?.toString() == imePkg) {
             val t = SystemClock.uptimeMillis()
             ownerImeLastAt = t
