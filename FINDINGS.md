@@ -2273,6 +2273,121 @@ Apple AirPods Pro 单只补配 ¥118
 `look` 给了模型看清这一屏的手段,但**什么时候该用它仍然由模型自己判断**,
 而模型恰恰是在自己判断错了的时候不会去用它。
 
+# 机主的键盘:从抱怨到验收(2026-09-08)
+
+机主的原话是「输入法唤不起来,必须切后台再回来」。这是整套方案里**唯一一处对机主
+的真实干扰** —— 别处都做到了不碰他那块屏,而这一处直接让他打不了字。
+
+## 根因:OWN_FOCUS 只做了一半
+
+副屏原来带的是 `OWN_FOCUS`(1<<14)。这个名字容易读成「这块屏的焦点自己管」,
+它实际只保证了一半:副屏**内部**有自己的焦点窗口。它没有阻止那个窗口同时成为
+**全局 top-focused window**。
+
+而 IMMS 认的正是全局 top-focused window:
+
+```
+副屏窗口成了全局顶层焦点窗口
+  → IMMS 拿它当 IME target
+  → 于是用**副屏**的 DISPLAY_IME_POLICY 去裁决系统里唯一的那个输入法
+  → 副屏是私有屏,策略是 DISPLAY_IME_POLICY_HIDE
+  → mDisplayIdToShowIme=-1,机主的键盘被摁下去
+```
+
+这条链在 `dumpsys input_method` 里逐字看得到:`mImeHiddenByDisplayPolicy=true` /
+`PHASE_SERVER_SHOULD_HIDE` / `reason=HIDE_DISPLAY_IME_POLICY_HIDE`。
+
+缺的那一半是 Android 15 加的 `VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED`
+(1<<16):**有自己的焦点,但不去抢全局顶层。** 两个标志要一起给。
+
+## 三组对照(同一个任务,各 90 秒)
+
+| 副屏标志位 | IME 隐藏请求 | IME target 落到副屏 | 机主看到的 |
+|---|---|---|---|
+| `OWN_FOCUS`,用完把焦点还给主屏 | 17 次 | 5 次 | 键盘反复被收又弹 |
+| `OWN_FOCUS`,不还焦点 | 2 次 | 全程停在副屏,`showIme=-1` | 唤不起来,切后台再回来才行 |
+| `OWN_FOCUS + STEAL_TOP_FOCUS_DISABLED` | **0 次** | **从没离开 display 0** | 无感 |
+
+中间那一行就是机主描述的原状。
+
+## 验收:副屏在跑、键盘开着(2026-09-08 19:44)
+
+上面三组证明的是「agent 干活不再扰动 IME 状态」,但那段时间**没有人在打字** ——
+不打扰一个空着的键盘不算数。这一轮补的是键盘真的开着时的。
+
+主屏三星笔记停在编辑页、讯飞输入法弹着;副屏 15 上连续启动三个 App:
+
+| 副屏动作 | `mInputShown` | `mDisplayIdToShowIme` | `mImeHiddenByDisplayPolicy` |
+|---|---|---|---|
+| 启动设置 | true | 0 | false |
+| 启动计算器 | true | 0 | false |
+| 启动淘宝 | true | 0 | false |
+
+期间 ImeTracker 里 **0 条 TYPE_HIDE**。只有每秒一条
+`ORIGIN_SERVER reason=CONTROLS_CHANGED PHASE_WM_GET_CONTROL_WITH_LEASH` ——
+那是键盘显示期间输入法窗口 leash 控制权的常规心跳,不是隐藏请求。
+
+**还差最后一步**:上面全程的「打字」是 `adb shell input text` 注入的,它**不经过输入法**。
+所以「键盘唤得起、不被摁下去」验完了,「机主真手指敲的字确实进得去」没验 ——
+那一步只能由机主本人做。
+
+## 顺带量到:让路判据的两条信号会同时哑掉
+
+用 `input text` 做上面那个实验时撞到一件更根本的事。让路判据靠两条活动信号:
+
+- 检测器一:输入法窗口在动(`imeArmed`)
+- 检测器二:读得到机主正在编辑的输入框(`fpReadable`)
+
+两条都不可用时 `signalArmed()` 返回 false,判据退回「只要键盘开着就算他在打字」。
+这一轮量到它真的发生了:
+
+```
+机主在打字,让了 180064 毫秒(等到 180 秒上限,他还在打 —— 这一下会打断他;
+轮询 341 次,输入框变了 0 次,主屏窗口变了 0 次,读不到输入框 344 次(其中输入法在动 0 次))
+```
+
+**三星笔记的编辑器读不出焦点节点**(和淘宝 SKU 面板一样是自绘的),检测器二 344 次
+全落空;而 `input text` 绕过输入法,检测器一一次都没被点亮。于是 agent 让满 180 秒
+上限、一步没做,而机主其实两分钟前就停手了。
+
+真人用讯飞打字时检测器一会亮,这个组合不出现。但它说明**保守分支是有代价的**,
+而日志现在把「他确实在打」和「我一个信号都没有,只能假设他在打」写成同一句话 ——
+这两种是不同的病,该分开写。同一行日志里那个「输入框已经 258276658 毫秒没动」
+也是假的:`fpChangedAt` 还是 0,减出来的是开机时长。
+
+## 一行日志打死了整个 agent
+
+`onAccessibilityEvent` 里为了追淘宝那条「加购成功」加过一行:
+
+```kotlin
+val says = e.text.joinToString(" ") { it.toString() }.trim()
+```
+
+那个假设后来被测量证伪(淘宝根本不发公告事件),缓冲区撤了,**这行日志留了下来**。
+
+`AccessibilityEvent.getText()` 返回的 `List<CharSequence>` **允许含 null 元素**,
+Kotlin 的平台类型不拦。打开三星笔记时炸了:
+
+```
+FATAL EXCEPTION: main
+java.lang.NullPointerException: ... Object.toString() on a null object reference
+    at EyesAndHands.onAccessibilityEvent$lambda$8(EyesAndHands.kt:157)
+Process: ai.whalephone.agent, PID: 8482 ... SIG: 9
+```
+
+进程被杀,**副屏跟着消失,正在保温的任务上下文全丢**。
+
+真正该修的不是这一行。`onAccessibilityEvent` 跑在系统主线程回调上,而它里面
+**一件正事都不做** —— 记时刻、写环形缓冲、打日志,全是观测。让观测代码有能力
+杀死整个 agent 是结构错误:下一个在这里加观测的人还会犯同样的错。
+
+三处一起改:回调整体 try/catch(不用 runCatching —— 这里每秒进来上千次,
+不该有 Result 的分配);字符串只在真要打日志时才拼(原来 trace 关着也照拼不误,
+而那段注释自己写着「这里做的任何事都得是常数级的」);元素按可空处理。
+
+观测失灵的正确后果是「这条信号哑了」,而判据对信号哑掉本来就有保守退路
+(`Conflict.signalArmed`)—— 不是把它观测的那个东西一起带走。
+
 ## 没做的
 
 没有自己做 ASR(录音送云端识别)。DeepSeek 那把密钥上只有文本和视觉模型,
