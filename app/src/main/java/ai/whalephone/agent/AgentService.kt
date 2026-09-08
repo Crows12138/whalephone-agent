@@ -129,6 +129,8 @@ class AgentService : Service() {
         val r = Privileged.moveTopTaskToMain(d.displayId)
         if (!r.startsWith("OK")) {
             Conflict.clearHandover()   // 没搬成就把闸门重新打开,agent 接着跑
+            // 两处都要说:对话记录留全文备查,取景窗上说给此刻正盯着按钮的人听
+            Conflict.handoverFailed(r.substringAfter("MOVE_FAIL:").trim().ifBlank { r })
             note("接管没成功,agent 继续跑着 —— $r")
             return START_STICKY
         }

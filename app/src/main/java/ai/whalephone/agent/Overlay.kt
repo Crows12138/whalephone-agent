@@ -334,6 +334,7 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
 
     private var full = -1
     private var hasDisplay: Boolean? = null
+    private var hintShown: Boolean? = null
 
     private val pump = object : Runnable {
         override fun run() {
@@ -341,15 +342,27 @@ class ScreenWindow(ctx: Context, wm: WindowManager) : FloatWindow(ctx, wm) {
             // 有没有副屏这件事在这里判,不在 onDraw 里判 —— 画的时候改别人的可见性
             // 会在同一帧里触发一次重新布局,安卓会警告 requestLayout during layout。
             val now = AgentService.liveDisplay != null
-            if (now != hasDisplay) {
+
+            // 那条提示带两种话:没副屏时解释这里为什么空着,有副屏时报接管为什么没成。
+            // 后者是补上来的 —— 按钮在这个窗口上,而结果原来只进对话记录,
+            // 机主看到的就是「点了没反应」。回话要落在按钮旁边。
+            val note = if (now) Conflict.handoverNote() else "副屏还没建起来 —— 下个任务开始时会出现"
+            val showHint = note != null
+            if (now != hasDisplay || showHint != hintShown) {
                 hasDisplay = now
-                hint.visibility = if (now) View.GONE else View.VISIBLE
+                hintShown = showHint
+                hint.visibility = if (showHint) View.VISIBLE else View.GONE
                 canvasView.visibility = if (now) View.VISIBLE else View.GONE
                 // 没有副屏就没有可接管的东西,按钮跟着画面一起收起来
                 takeBtn.visibility = if (now) View.VISIBLE else View.GONE
                 // 没有副屏的时候把窗口缩成一条提示,别在机主屏幕上占一大块空白
                 lp.height = if (now) full else WindowManager.LayoutParams.WRAP_CONTENT
                 apply()
+            }
+            if (note != null) {
+                if (hint.text != note) hint.text = note
+                // 「没成」和「本来就空着」是两回事,颜色上分开
+                hint.setTextColor(if (now) pal.warn else pal.textSub)
             }
             // 文案每帧从事实推出来,不由点击那一下写死。
             //

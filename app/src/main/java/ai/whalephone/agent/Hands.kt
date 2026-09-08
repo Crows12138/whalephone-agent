@@ -503,6 +503,7 @@ object Conflict {
      */
     fun beginHandover(waitMs: Long = 3000): Boolean {
         handover = true
+        failWhy = null   // 这一次的结果还没出来,上一次的那句话不该还挂在屏幕上
         val end = android.os.SystemClock.elapsedRealtime() + waitMs
         while (inFlight.get() > 0 && android.os.SystemClock.elapsedRealtime() < end)
             runCatching { Thread.sleep(50) }.getOrElse { return false }
@@ -511,6 +512,28 @@ object Conflict {
 
     /** 开闸。两处用:接管没搬成(agent 接着跑)、以及新任务开工前的复位 */
     fun clearHandover() { handover = false }
+
+    /**
+     * 上一次接管没成的原因,给取景窗显示用。
+     *
+     * 存在的理由:按钮在取景窗上,而结果原来只 post 到对话记录里 —— 那要打开 app
+     * 才看得见,于是机主的体验是「点了没反应」。真机上撞到了,连点四次。
+     * **按钮在哪儿,回话就该在哪儿。**
+     *
+     * 和文案那处一样是「事实」而不是「命令」:这里只记下发生了什么和什么时候,
+     * 显示成什么样、显示多久由取景窗每帧自己算,谁都不需要负责把它清掉。
+     */
+    @Volatile private var failWhy: String? = null
+    @Volatile private var failAt = 0L
+
+    fun handoverFailed(why: String) {
+        failWhy = why
+        failAt = android.os.SystemClock.elapsedRealtime()
+    }
+
+    /** 几秒之内的那条,过期自己消失 */
+    fun handoverNote(withinMs: Long = 5000): String? =
+        failWhy?.takeIf { android.os.SystemClock.elapsedRealtime() - failAt < withinMs }
 
 
     /**
