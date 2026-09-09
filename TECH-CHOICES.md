@@ -578,3 +578,27 @@ contentDescription 的容器,数量不为零而信息量为零,这两种情况�
 - **息屏后 agent 停工。** 副屏和主屏共用电源组,主屏一灭副屏跟着灭。这不是能绕过的,
   实测过三条路(OWN_DISPLAY_GROUP / DEVICE_DISPLAY_GROUP / 副屏 display context 上的
   唤醒锁)都不行,细节见 FINDINGS.md。
+
+## 十一、配置项
+
+手机上没有环境变量,等价物是 app 内的配置项(存 SharedPreferences,也可用 adb 广播灌入,
+方便无人值守地跑测试)。
+
+| 键 | 说明 | 默认 |
+|---|---|---|
+| `LLM_BASE_URL` | OpenAI 兼容接口的 base url | `https://api.deepseek.com/v1` |
+| `LLM_API_KEY` | 接口密钥 | 无,必填 |
+| `LLM_MODEL` | 模型名 | `deepseek-chat` |
+| `VLM_MODEL` | 视觉模型名。**留空就是不开看图那条路**(见第九·七节) | 无 |
+| `VLM_BASE_URL` / `VLM_API_KEY` | 视觉模型的接口和密钥,留空则沿用上面那组 | 无 |
+| `A11Y_AUTO` | 设为 `0` 则不自动开关无障碍权限,由机主自己管 | 开 |
+| `IDLE_KEEP_MS` | 做完一件事之后还醒着多久,`0` 表示做完就收 | `300000` |
+| `TYPING_IDLE_MS` | 键盘开着但机主一个键都没按过时,多久没动静算他停手 | `10000` |
+| `DRAFT_IDLE_MS` | 机主按过键之后,多久没动静算他停手(单列是因为他手里可能攥着一串没上屏的拼音,而「正在组词」从系统外面读不到) | `10000` |
+| `FOCUS_RETURN` | 设为 `0` 则空闲时不把焦点还给主屏 | 开 |
+| `OVERLAY_BALL` / `OVERLAY_SCREEN` | 两个悬浮窗上次是开是关,开机后照它恢复 | 关 |
+| `DEMO_FEED` | 设为 `1` 把副屏画面写成 PNG,给电脑端 `scripts/vd_view.py` 取景 | 关 |
+
+DeepSeek / Kimi / 智谱 / OpenRouter / 自建 vLLM 是同一套协议,换 base_url 和 model 即可。
+DeepSeek 同一把密钥上就有视觉模型,`VLM_MODEL` 填 `deepseek-v4-flash-vision-exp`、
+另两格留空即可。
