@@ -13,7 +13,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 . scripts/lib.sh
 
 A=ai.whalephone.agent
-GOAL="${1:-打开淘宝,搜索 AirPods Pro 2,把搜索结果里第一个商品加入购物车,加完告诉我加的是哪个}"
+# 和演示同一个串(定义在 lib.sh)。这里过了才代表演示那条链路是通的。
+GOAL="${1:-$DEMO_GOAL}"
 
 echo "目标:$GOAL"
 echo

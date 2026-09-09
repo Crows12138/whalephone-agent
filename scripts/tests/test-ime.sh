@@ -15,7 +15,10 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 A=ai.whalephone.agent
-GOAL="${1:-打开淘宝,搜索「保温杯」,告诉我前两个商品的价格和店铺}"
+# 只读任务(不动购物车),这样可以连着重跑而不用清场。给够条件让它多走几步 ——
+# 这个脚本量的是「机主打字的这段时间里键盘掉没掉」,任务越短,重叠的窗口越小,
+# 一个 3 步就结束的任务能跑出漂亮读数,只是因为它没在机主打字的时候干过活。
+GOAL="${1:-淘宝上找个保温杯,500 毫升上下的,你挑两个觉得值的,把价格和店铺报给我,顺便说说为什么是这两个}"
 
 ime()   { sh dumpsys input_method | grep -oE "mInputShown=[a-z]+" | head -1 | cut -d= -f2; }
 focus() { sh dumpsys input | grep -oE "FocusedDisplayId: [0-9]+" | grep -oE "[0-9]+$" | head -1; }

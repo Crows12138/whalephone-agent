@@ -12,7 +12,9 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 A=ai.whalephone.agent
-GOAL="${1:-打开淘宝,搜索「机械键盘」,告诉我第一个商品多少钱}"
+# 只读任务,但要多走几步:这里比的是「机主打的 26 个字母一个不缺」,
+# 而字是一秒一个打的 —— 任务比打字先结束,后面那些字就没人跟它抢,白测。
+GOAL="${1:-淘宝上找把机械键盘,要红轴的,挑个便宜又不像杂牌的,告诉我多少钱、哪家店}"
 TYPE="abcdefghijklmnopqrstuvwxyz"
 
 snap0() {

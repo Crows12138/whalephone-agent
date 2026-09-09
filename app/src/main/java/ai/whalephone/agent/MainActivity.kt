@@ -219,9 +219,12 @@ class MainActivity : Activity() {
             "任务跑在一块你看不见的副屏上,你这块屏该刷什么刷什么 —— 焦点、键盘、剪贴板都不会被动。\n想看它在做什么,点上面的「看副屏」。",
             13f, pal.textSub).apply { setPadding(0, Ui.dp(this@MainActivity, 8f), 0, Ui.dp(this@MainActivity, 12f)) })
         listOf(
-            "打开淘宝,搜索「AirPods Pro 2」,第一个商品多少钱",
-            "打开美团,看看附近评分最高的川菜馆",
-            "打开日历,看看我明天有什么安排",
+            // 例子按**主人平时说话的样子**写:说清要什么、不要什么,不写步骤。
+            // 写成「打开淘宝 → 搜索 → 点第一个」只会教人把 agent 当遥控器用,
+            // 而它能做的是比完再挑;第一句摆在最前,因为加购是真的改变外部状态的那种。
+            "淘宝上找个 AirPods Pro 2,别要二手和资源机,挑个靠谱的加进购物车",
+            "美团看看附近的川菜馆,人均 80 以内评分最高的是哪家",
+            "日历里看看我明天几点有事,中间有没有空出两个钟头",
         ).forEach { ex ->
             box.addView(Ui.text(this, ex, 13f, pal.accent).apply {
                 setPadding(Ui.dp(this@MainActivity, 12f), Ui.dp(this@MainActivity, 9f),
