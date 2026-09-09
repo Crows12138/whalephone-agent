@@ -76,7 +76,27 @@ class Hands(
      *
      * 注意无障碍动作(performAction)不走这里 —— 它根本不经过输入系统,不碰焦点。
      */
-    private fun inject(vararg argv: String): String = Privileged.execArgs(*argv)
+    /**
+     * 这一步有没有**真的对界面动过手**。
+     *
+     * 卡死判定要靠它。「界面没变」只有在确实动过手的前提下才是证据 —— 没动手的那些
+     * 轮次界面当然不变,把它们算进去,守卫就从保护变成了处决:真机上守卫连着拦下三次
+     * 重复加购,循环随即判「界面连续 4 步没有变化」收工,而那件商品**已经在购物车里了**,
+     * 任务其实成了,报出去的却是失败。
+     *
+     * 默认 false,只在真的注入了输入、或真的下了无障碍动作的地方置 true。
+     * 方向是刻意的:以后加了新动作忘了置位,最坏是卡死判定晚一点触发(还有 maxSteps
+     * 兜底);反过来默认 true 而漏掉一条拒绝路径,就是又一次把成功的任务判死。
+     *
+     * 它替掉的是原来那份「哪些动作名不改变界面」的黑名单 —— 黑名单枚举的是猜测,
+     * 这里记的是事实。
+     */
+    @Volatile var acted = false
+
+    private fun inject(vararg argv: String): String {
+        acted = true
+        return Privileged.execArgs(*argv)
+    }
 
     /** 这一帧的 base64 JPEG,拿不到返回 null */
     /** [marks] 非空时把序号画到图上,见 AgentDisplay.drawMarks */
@@ -96,7 +116,11 @@ class Hands(
         if (nx !in 0..1000 || ny !in 0..1000) return "坐标要在 0 到 1000 之间,你给的是 ($nx, $ny)"
         val x = nx * metrics.widthPixels / 1000
         val y = ny * metrics.heightPixels / 1000
-        repeatGuard(cell(nx, ny))?.let { return it }
+        // 这一点上有元素就按元素记账,和读序号那条路合到同一本账上;
+        // 整页自绘(看图这条路的常态)读不到元素,才退回按格子记。
+        val hit = hitAt(x, y)
+        if (hit == null) Log.i(TAG, "     ($x,$y) 上没有元素,守卫退回按格子记(树里 ${last?.elements?.size ?: 0} 个元素)")
+        repeatGuard(hit?.let { keyOf(it) } ?: cell(nx, ny))?.let { return it }
         val moved = changed { inject("input", "-d", "$displayId", "tap", "$x", "$y") }
         return if (moved) "已在 ($nx, $ny) 点了一下"
         else "在 ($nx, $ny) 点了一下,界面没有反应 —— 那个位置多半没有能点的东西,换一处"
@@ -152,7 +176,7 @@ class Hands(
     }
 
     /**
-     * 同一处点过几次。键是[cell]:屏幕上的一格 —— 序号每步重编不能当身份,
+     * 同一个按钮按过几次。键是 [keyOf]:元素的边界 —— 序号每步重编不能当身份,
      * 而序号和坐标这两种下达方式必须记在同一本账上。
      */
     private val clicked = mutableMapOf<String, Int>()
@@ -176,33 +200,57 @@ class Hands(
      * 第三次开始就是循环了。
      */
     /**
-     * 屏幕上的哪一格。守卫的记账单位。
+     * 守卫的记账单位:**你按下的是哪个按钮**。
      *
-     * 拦的是「同一个位置被点了几次」,不是「同一条指令下了几次」——
-     * 报坐标和读序号是同一件事的两种说法,它们必须落进**同一套坐标系**,
-     * 否则模型在两者之间换着来就绕过去了。实测它正是这么绕的:同一个
-     * 「加入购物车」按钮,看图那一步用 tap 点一次、读到序号之后又 click 点一次,
-     * 守卫两边各记一笔、都没到上限,购物车里进了两件。
+     * 拦的是「同一件事被做了几遍」这个物理事实,不是「同一条指令下了几次」——
+     * 报坐标和读序号是同一件事的两种说法,必须记在同一本账上,否则模型在两者之间
+     * 换着来就绕过去了。
      *
-     * 格子取屏幕的 3%,比手指头还小,同一个按钮上的点都会落进同一格;
-     * 而模型报坐标每次都差一点((500,935)、(500,930)、(500,920)),
-     * 一字不差地比等于不拦。
+     * 上一版把账记在「屏幕上的哪一格」上,格子边长取屏宽的 3%。当时写的理由是
+     * 「比手指头还小,同一个按钮上的点都会落进同一格」—— **这句话是反的**,而且
+     * 真机上量到了:一格约 32 px,一个「加入购物车」按钮宽 400 px,读序号那条路
+     * 按的是节点中心,看图那条路模型报的是屏幕水平中线,两者差了 15% 屏宽,
+     * 落进两格,守卫各记一笔都没到上限,购物车里进了两件。
+     * **记账单位比它要识别的那个东西细一个量级,就等于没在记账。**
      *
-     * 不带元素标签。同一个标签在不同位置是不同按钮(购物车每一行都有「删除」),
-     * 坐标天然把它们分开,比标签更准;反过来列表滚动之后同一格换了个按钮会被
-     * 多拦一次 —— 那个代价只是让模型换条路,比漏拦一次重复下单便宜得多。
+     * 所以改成按元素的边界记:同一个按钮上的任何一点都归到同一个键。边界量化到
+     * 同一套 3% 网格,吸收懒加载带来的几像素抖动。
+     *
+     * 仍然不带元素标签。同一个标签在不同位置是不同按钮(购物车每一行都有「删除」),
+     * 边界天然把它们分开;反过来列表滚动之后按钮挪了位会被当成新按钮 —— 那个代价
+     * 只是漏拦一次,比把「删除」记成同一个按钮而拦错要安全。
      */
-    private fun cell(nx: Int, ny: Int) = "点@${nx / TAP_GRID},${ny / TAP_GRID}"
+    private fun keyOf(b: Rect): String {
+        fun qx(v: Int) = if (metrics.widthPixels > 0) v * 1000 / metrics.widthPixels / TAP_GRID else 0
+        fun qy(v: Int) = if (metrics.heightPixels > 0) v * 1000 / metrics.heightPixels / TAP_GRID else 0
+        return "按@${qx(b.left)},${qy(b.top)}~${qx(b.right)},${qy(b.bottom)}"
+    }
 
-    /** 像素坐标先归一化到 0-1000,再落格。序号那条路走这里进 [cell] */
-    private fun cellOfPixels(x: Int, y: Int) = cell(
-        if (metrics.widthPixels > 0) x * 1000 / metrics.widthPixels else 0,
-        if (metrics.heightPixels > 0) y * 1000 / metrics.heightPixels else 0,
-    )
+    /**
+     * 落在这个像素点上的是哪个按钮。嵌套时取**最小**的那个 —— 最内层才是真正被按下的。
+     *
+     * 铺满屏的容器不算数。整页自绘的界面(淘宝的规格弹层就是)树里只剩一两个没有文字的
+     * 大容器,取「包含这个点的最小元素」就会取到它:弹层上点哪儿都归到同一个键,
+     * 该分开的全合了,该合的一个没合。真机日志里它长这样 —— `按@0,0~33,32`,
+     * 左上角到右下角。超过半块屏的,一律当作「这里没有按钮」,退回按格子记。
+     */
+    private fun hitAt(x: Int, y: Int): Rect? {
+        val half = metrics.widthPixels.toLong() * metrics.heightPixels / 2
+        return last?.elements
+            ?.mapNotNull { e -> Rect().also { e.node.getBoundsInScreen(it) }.takeIf { !it.isEmpty && it.contains(x, y) } }
+            ?.filter { it.width().toLong() * it.height() < half }
+            ?.minByOrNull { it.width().toLong() * it.height() }
+    }
+
+    /** 屏幕上的哪一格。只在这一点上什么元素都没有(整页自绘)时兜底 */
+    private fun cell(nx: Int, ny: Int) = "点@${nx / TAP_GRID},${ny / TAP_GRID}"
 
     private fun repeatGuard(id: String): String? {
         val n = (clicked[id] ?: 0) + 1
         clicked[id] = n
+        // 键本身要能看见。合不上的时候,日志里两条不同的键就是唯一能指认原因的东西 ——
+        // 真机上「加入购物车」按了四次而守卫只记到两次,光看行为分不清是键错了还是次数放宽了。
+        Log.i(TAG, "     守卫 $id 第 $n 次")
         return when {
             n <= MAX_SAME_CLICK -> null
             else -> "这一处你已经点过 $MAX_SAME_CLICK 次了,不再帮你点第 $n 次。" +
@@ -243,13 +291,14 @@ class Hands(
     fun click(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
         val b = Rect().also { e.node.getBoundsInScreen(it) }
-        repeatGuard(cellOfPixels(b.centerX(), b.centerY()))?.let { return it }
+        repeatGuard(keyOf(b))?.let { return it }
         val onScreen = !b.isEmpty &&
             b.centerX() in 0 until metrics.widthPixels &&
             b.centerY() in 0 until metrics.heightPixels
 
         if (!onScreen) {
             // 触摸点落不到这块屏上。无障碍点击不需要坐标,这时候它是唯一的路。
+            acted = true
             val ok = Actions.click(e)
             Thread.sleep(SETTLE_MS)
             return if (ok) "已点击 [$i] ${e.label()}(它不在屏幕可见范围内,走的无障碍点击)"
@@ -265,6 +314,7 @@ class Hands(
 
     fun longClick(i: Int): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
+        acted = true
         return if (Actions.longClick(e)) "已长按 [$i]" else "长按 [$i] 失败"
     }
 
@@ -278,6 +328,7 @@ class Hands(
     fun setText(i: Int, text: String): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
 
+        acted = true
         if (Actions.setText(e, text)) return "已在 [$i] 填入「$text」"
 
         val pasted = clipboard.around { Actions.paste(ctxRef, e, text) }
@@ -344,6 +395,7 @@ class Hands(
     fun scroll(i: Int, forward: Boolean): String {
         val e = el(i) ?: return "没有序号 $i 这个元素"
         var accepted = false
+        acted = true
         if (changed { accepted = Actions.scroll(e, forward) }) return "已滚动 [$i]"
         return if (accepted) "[$i] 收下了滚动但界面没动 —— 到头了,或者这个容器只认真实划动,试试 swipe"
         else "[$i] 滚不动(它没有声明自己可滚动)—— 试试 swipe"
@@ -416,6 +468,38 @@ class Hands(
         val near = apps.filter { a -> k.split(" ", "-", ".").any { it.length > 1 && a.first.lowercase().contains(it) } }
             .take(8).map { "${it.first}(${it.second})" }
         return hit?.second to near
+    }
+
+    /**
+     * 这台设备上能打开的 App,显示名。
+     *
+     * 模型原来只能从副屏桌面的图标猜「有没有装这个 App」,而那一屏经常还没画出来、
+     * 或者整页自绘读不出来。真机上因此整轮报废过一次:第一步桌面是空的,它就断定
+     * 淘宝没装,接着去 Chrome 开网页版、去 Play 商店想装一个已经装着的 App,
+     * 40 步全耗在这上面 —— 而它从头到尾没试过 launch「淘宝」。
+     *
+     * 「装了哪些 App」是设备上的客观事实,查一下就有。和 [resolvePackage] 不让模型
+     * 猜包名是同一条:凡是系统里现成的事实,都不该让模型从像素里推。
+     *
+     * 只给显示名不给包名:launch 两个都收,而包名会让这一段长三倍。
+     * 结果缓存 —— 一次任务里装没装 App 不会变,而这一段每轮都要拼进系统提示。
+     */
+    val installedApps: List<String> by lazy {
+        val pm = ctxRef.packageManager
+        runCatching {
+            pm.queryIntentActivities(
+                android.content.Intent(android.content.Intent.ACTION_MAIN)
+                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0
+            ).map { it.loadLabel(pm).toString().trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .sorted()
+        }.getOrDefault(emptyList()).also {
+            // 这一段要拼进系统提示。是不是真的拿到了,只有这里看得见 ——
+            // 包可见性被清单里的 <queries> 卡住时它会是空的,而空了不会报错,
+            // 只是模型又退回从桌面图标猜。
+            Log.i(TAG, "这台设备可启动的 App:${it.size} 个")
+        }
     }
 
     fun launch(nameOrPkg: String): String {

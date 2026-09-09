@@ -40,7 +40,9 @@ class Agent(
      */
     private val vlm: Llm? = null,
 ) {
-    data class Step(val n: Int, val thought: String, val action: String, val result: String)
+    /** [acted] = 这一步有没有真的动过手。见 Hands.acted —— 卡死判定只认动过手的那些步 */
+    data class Step(val n: Int, val thought: String, val action: String, val result: String,
+                    val acted: Boolean = false)
     data class Outcome(val done: Boolean, val message: String, val trace: List<Step>)
 
     private val trace = mutableListOf<Step>()
@@ -75,6 +77,7 @@ class Agent(
 
     fun run(): Outcome {
         var lastRender = ""
+        var beforeLastRender = ""
         var sameCount = 0
 
         // n 只数「真正动过手」的步。让路的那些轮不占预算 —— 否则机主多打几次字,
@@ -94,6 +97,7 @@ class Agent(
                 return Outcome(true, "你接管了,它做到第 ${trace.size} 步就停手了", trace.toList())
             rounds++
             n++
+            hands.acted = false   // 这一轮还没动手;动过的地方自己会置回来
             // 接下来是拍快照 + 等模型返回,agent 这几秒什么都不做。
             // 焦点这段时间没有理由押在副屏上 —— 押着的代价是机主一碰自己的屏幕就可能
             // 「Application does not have a focused window」。实测这类空闲占了任务
@@ -109,7 +113,7 @@ class Agent(
             // 让过路的那一步本来就没动手,界面当然没变 —— 它不能算进「原地踏步」。
             // 不排掉的话,机主多打几次字,任务就会被误判成卡死。
             val idled = render == lastRender && !lastStepYielded &&
-                trace.lastOrNull()?.action.let { it != null && it != "note" && it != "look" }
+                trace.lastOrNull()?.acted == true
             lastStepYielded = false   // 判完就清:它描述的是**上一步**
             // 这一轮开头的画面。和上一轮开头那张一对比,就知道中间那个动作改变了什么。
             // 每轮都取是因为「值不值得对比」要等下面算完 idled 才知道,那时候动作
@@ -137,6 +141,19 @@ class Agent(
                     })
                 }
             } else sameCount = 0
+            // 「这一屏和两步之前那一屏一样,但和上一步不一样」——**来回**。
+            //
+            // 这是只有循环看得见的事实:模型每一轮只看得见当前这一帧,回头看到的
+            // 只是一行「已点击 [50] 加入购物车」,分不出「我把这件事做成了、界面自然
+            // 退回来了」和「我这一下没生效」。真机上淘宝加购正是这样:点详情页的
+            // 加购弹出规格层,在规格层上再点一次**真的加进去了**,然后规格层关闭,
+            // 屏幕退回详情页 —— 和动手之前一模一样。它读成「没反应」,于是整套再来
+            // 一遍,购物车里就是两件。每个按钮都只按了两次,重复守卫全程合规。
+            //
+            // 卡死判定看的是「连着几帧一样」,这种一进一出每帧都在变,它看不见。
+            oscillated = render.isNotEmpty() && render == beforeLastRender &&
+                render != lastRender && trace.lastOrNull()?.acted == true
+            beforeLastRender = lastRender
             lastRender = render
             if (sameCount >= 3) {
                 return Outcome(false, "界面连续 4 步没有变化,判定卡住了", trace)
@@ -159,14 +176,14 @@ class Agent(
             val reply = runCatching {
                 if (eyes != null && shot != null) eyes.chat(
                     listOf(
-                        Llm.Message("system", SYSTEM_EYES),
+                        Llm.Message("system", SYSTEM_EYES + appList()),
                         Llm.Message("user", userTurn(n, eyesNote(mk.size)), imageB64 = shot),
                     ),
                     // 带图的请求要上传几百 KB,手机上网速抖,给它比文本更宽的余量
                     timeoutMs = 90_000,
                 ) else llm.chat(
                     listOf(
-                        Llm.Message("system", SYSTEM),
+                        Llm.Message("system", SYSTEM + appList()),
                         Llm.Message("user", userTurn(n, render)),
                     )
                 )
@@ -375,14 +392,19 @@ class Agent(
             val s = hands.last
             if (s != null && s.elements.isEmpty() && s.packages.isEmpty() && s.wmSays == null)
                 "副屏上还一个 App 都没有,没有任何东西在加载 —— 等下去界面不会变。用 launch 打开 App"
-            else { Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下" }
+            else {
+                // 等待没有注入任何输入,但它**期待界面自己变**。等完还是没变,
+                // 那就是货真价实的「没变」,该算进卡死判定 —— 否则一直 wait 就没人管了。
+                hands.acted = true
+                Thread.sleep(a.optLong("ms", 1000).coerceIn(100, 60_000)); "等了一下"
+            }
         }
         else         -> "不认识的动作 $name"
     }
 
     private fun record(n: Int, thought: String, action: String, result: String) {
         Log.i(TAG, "     -> $result")
-        val s = Step(n, thought, action, result)
+        val s = Step(n, thought, action, result, hands.acted)
         trace += s
         onStep?.invoke(s)
     }
@@ -409,8 +431,28 @@ class Agent(
             appendLine()
         }
         if (trace.isNotEmpty()) {
-            appendLine("已经做过的:")
-            trace.takeLast(8).forEach { appendLine("  ${it.n}. ${it.action} -> ${it.result}") }
+            // 每一步都带上**当时怎么想的**,不只是做了什么、结果如何。
+            //
+            // 原来这里只渲染 `动作 -> 结果`。真机上因此栽过:它挑中一个商品、点进去
+            // 看到「商品已经卖光啦」、back 回列表 —— 而历史里留下的只有
+            // 「2. back -> 已按键 4」,不含「因为卖光了」。「这个候选被排除了」这种
+            // 事实**只活在 thought 里**,它是模型的推理产物,不是任何动作的 result。
+            // 于是下一轮它面对的还是同一张列表加一段不含理由的历史,当然又推出同一个
+            // 答案,连着四次,最后被重复守卫拦下、卡死判定收工。
+            //
+            // 卖光只是其中一例:限购、不发货到本地、进去才发现是预售、要选规格才知道
+            // 没货 —— 凡是「上一步学到的东西只存在于 thought 里」的场景都是这个洞。
+            // 靠提示词要求它「记得把排除理由 note 下来」是补不上的:那又是一条
+            // 以「模型记得做 X」为前提的规则。
+            //
+            // 这也是 ReAct 本来的形态 —— thought / action / observation 三件一起进
+            // 上下文,原来的写法丢了中间那件。代价是 8 条历史多出约 1 KB,
+            // 相对一屏元素渲染(几十 KB)可以忽略。
+            appendLine("已经做过的(带上你当时的判断,别把已经排除过的又捡回来):")
+            trace.takeLast(8).forEach {
+                appendLine("  ${it.n}. 你当时想:${it.thought}")
+                appendLine("     于是 ${it.action} -> ${it.result}")
+            }
             appendLine()
         }
         // 卡死检测靠的是「快照连续几帧一样」,但模型可以一直点不同的元素、
@@ -421,8 +463,66 @@ class Agent(
             appendLine("注意:你已经连续三步都在 ${last3[0].action},显然没有推进。换一个动作。")
             appendLine()
         }
+        // 「刚做完一步又把它退掉」是模型改主意**唯一赖不掉的外部痕迹**。
+        //
+        // 它自己不会承认在改主意。真机上它把「换一个商品」写成纠错:thought 里是
+        // 「用户明确要 X,当前这个不是目标商品」—— 在它眼里主人另外半句话(「第一个」)
+        // 根本不算一个条件,所以不存在歧义,也就没什么好问的。靠一条
+        // 「你察觉到歧义就 ask」的规则救不了,那条规则的前提就不成立。
+        //
+        // 退回去这个动作是它自己做的,赖不掉。而且这一句出现在它**下一步动手之前**,
+        // 时机正好卡在「重新挑一个」之前 —— 换完再说就晚了,主人拿到的已经是别的东西。
+        if (trace.size >= 2 &&
+            trace.last().action == "back" &&
+            trace[trace.size - 2].action in ENTERING
+        ) {
+            appendLine(
+                "注意:你上一步把自己刚做的那一步退掉了。这一屏和你做那一步之前一模一样 —— " +
+                    "**变的不是屏幕,是你**:你进去看过了,知道了一些在这一屏上看不出来的事" +
+                    "(就写在上面「已经做过的」里)。别对着同一张界面从头再推一遍," +
+                    "把刚学到的算进去。"
+            )
+            appendLine(
+                "如果你接下来打算换一个目标(换个商品、换条结果、换个入口),先分清是哪一种:" +
+                    "你是**比过之后换成更好的那个**,还是只是觉得「刚才那个名字看着不像」。" +
+                    "前者要把比较的依据说出来 —— 价格、销量、店铺、是不是二手,页面上都写着。" +
+                    "后者多半是你把主人的话读窄了:名字只是他给的条件之一,他还说了别的。" +
+                    "两个条件指向不同的东西时,挑哪个归他,ask 一句。"
+            )
+            appendLine()
+        }
+        if (oscillated) {
+            appendLine(
+                "注意:这一屏和你**两步之前**那一屏一模一样,中间那一下把你带出去又带了回来。"
+            )
+            appendLine(
+                "这通常不是「没生效」,而是那一步**已经做完了** —— 弹层、确认框、规格层" +
+                    "在你把它做完之后本来就会消失,界面自然退回你动手之前的样子。" +
+                    "会改变外部状态的事(加购、提交、发送)尤其如此:结果根本不在这一屏上。" +
+                    "再走一遍这个来回,不会得到新信息,却会**把这件事做第二遍**。" +
+                    "下一步只能是去能看到结果的地方核对,或者换条路。"
+            )
+            appendLine()
+        }
         appendLine("这是第 $n 步(最多 $maxSteps 步)。副屏当前界面:")
         append(render)
+    }
+
+    /** 这一屏是不是绕回了两步之前那一屏。只有循环看得见,见 run() 里算它的地方 */
+    private var oscillated = false
+
+    /** 「往里进了一层」的动作。紧跟着一个 back,就是把自己刚做的那一步退掉了 */
+    private val ENTERING = setOf("click", "tap", "double_tap", "long_click")
+
+    /**
+     * 接在系统提示后面:这台机器上有哪些 App。见 Hands.installedApps ——
+     * 少了这一段,模型只能从桌面图标猜装没装,猜错一次就是整轮报废。
+     */
+    private fun appList(): String = hands.installedApps.let {
+        if (it.isEmpty()) "" else
+            "\n\n这台手机上装了这些 App,都可以直接 launch(写显示名就行):\n" +
+            it.joinToString("、") +
+            "\n桌面上看不到图标不代表没装 —— 以这份名单为准。"
     }
 
     /** 模型爱把 JSON 包在 ``` 里,或者前后带一句话。取第一个完整的 JSON 对象。 */
@@ -550,6 +650,17 @@ class Agent(
               状态。一闪而过的提示不算数 —— 没看见它,不等于没成。核对完再决定重不重做。
             - 这条路上**没法打字**。要输入文字就先 back 回到上一页,那里通常读得到元素。
             - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
+            - **要从一堆候选里挑一个,先比再挑,别抓到第一个「名字像」的就走。**
+              列表上通常已经写着标题、价格、销量、店铺类型,那些就是拿来比的。
+              名字字面对得最上的那个,可能贵一倍、可能只有个位数人付款、可能是二手或
+              资源机;而排在前面的那个,往往是平台按综合权重排出来的。比完在 thought 里
+              说清为什么是它,done 的 summary 里也要写明你挑的是哪一个、凭什么 ——
+              主人要能核对你的选择,而不是只拿到一句「办好了」。
+            - **主人自己给了挑选条件,就照他的来**(他说了「第一个」「最便宜的」
+              「哪家店的」),别拿你自己的标准去盖过他的。他给的条件互相打架时
+              —— 比如既说了排第几、又说了要什么名字,而这两个指的不是同一个东西 ——
+              那才是 ask 的时候:把两种读法摆给他挑。别自己选一种闷头做完,
+              他拿到的会是他没选过的那个,而且他不会知道你替他选过。
             - 目标里某一项确实做不到时,把做到的 note 下来然后 done,在 summary 里说清楚
               哪一项没成、你试过什么。**无限试下去是最差的结果。**
             - 目标达成就立刻 done,不要多点。
@@ -588,6 +699,17 @@ class Agent(
             - 序号只在当前这份列表里有效,每一步都会重新编号,不要用上一步的序号。
             - 你没有键盘,文字一律用 set_text 写进输入框。
             - 花钱、给别人发消息、以及任何撤不回来的操作,先 ask,不要自己拍板。
+            - **要从一堆候选里挑一个,先比再挑,别抓到第一个「名字像」的就走。**
+              列表上通常已经写着标题、价格、销量、店铺类型,那些就是拿来比的。
+              名字字面对得最上的那个,可能贵一倍、可能只有个位数人付款、可能是二手或
+              资源机;而排在前面的那个,往往是平台按综合权重排出来的。比完在 thought 里
+              说清为什么是它,done 的 summary 里也要写明你挑的是哪一个、凭什么 ——
+              主人要能核对你的选择,而不是只拿到一句「办好了」。
+            - **主人自己给了挑选条件,就照他的来**(他说了「第一个」「最便宜的」
+              「哪家店的」),别拿你自己的标准去盖过他的。他给的条件互相打架时
+              —— 比如既说了排第几、又说了要什么名字,而这两个指的不是同一个东西 ——
+              那才是 ask 的时候:把两种读法摆给他挑。别自己选一种闷头做完,
+              他拿到的会是他没选过的那个,而且他不会知道你替他选过。
             - 问一句的代价是主人要放下手上的事来回答你。只有上面那三类、或者目标确实缺了
               做不下去的关键信息才问。
             - 「界面没有变化」是**我这边看不出变化**,不是「你的动作没生效」。有的操作
